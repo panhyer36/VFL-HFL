@@ -1,0 +1,124 @@
+# VFL 垂直聯邦學習配置文件
+
+# 聯邦學習配置
+federated_learning:
+  algorithm: "vfl_fedavg"  # VFL 聯邦平均算法
+  global_rounds: 100       # 全局訓練輪數
+  client_fraction: 1.0     # 參與訓練的客戶端比例 (VFL通常是全體參與)
+  num_clients: 5           # 客戶端數量 (Consumer_01 到 Consumer_05)
+  eval_interval: 10        # 評估間隔
+
+  # 訓練策略配置
+  training_strategy:
+    phase1_rounds: 10      # 階段1: 每輪都訓練 Fusion + Weather
+    phase2_rounds: 90      # 階段2: 4輪訓練 Fusion，1輪訓練 Weather
+    phase2_fusion_freq: 4  # 階段2中每訓練多少輪 Fusion 後訓練一次 Weather
+
+# 本地訓練配置
+local_training:
+  local_epochs: 1          # 本地訓練輪數 (VFL每輪通常是1個epoch)
+  learning_rate: 0.001     # 學習率
+  batch_size: 32           # 批次大小
+
+# 模型配置 - Weather Model (雲端)
+weather_model:
+  feature_dim: 9           # Weather 特徵維度
+  d_model: 256             # Transformer模型維度
+  nhead: 8                 # 注意力頭數
+  num_layers: 4            # Transformer層數
+  output_dim: null         # VFL不需要輸出層，只輸出嵌入
+  max_seq_length: 100      # 最大序列長度
+  dropout: 0.1             # Dropout率
+
+# 模型配置 - HFL Model (本地客戶端)
+hfl_model:
+  feature_dim: 14          # HFL 特徵維度 (Consumer 電器用電數據)
+  d_model: 256             # Transformer模型維度
+  nhead: 8                 # 注意力頭數
+  num_layers: 4            # Transformer層數
+  output_dim: null         # VFL不需要輸出層
+  max_seq_length: 100      # 最大序列長度
+  dropout: 0.1             # Dropout率
+  freeze: true             # 是否凍結 HFL 模型 (使用 Per-FedAvg 個性化權重)
+
+# 模型配置 - Fusion Model (本地客戶端)
+fusion_model:
+  embedding_dim_weather: 256  # Weather 嵌入維度
+  embedding_dim_hfl: 256      # HFL 嵌入維度
+  hidden_dim: 256             # 融合層隱藏維度
+  output_dim: 1               # 輸出維度 (Power_Demand預測)
+  dropout: 0.1                # Dropout率
+
+# 數據配置
+data:
+  data_path: "data"
+  weather_csv: "Weather"              # Weather 數據文件名 (不含.csv)
+  hfl_csv_pattern: "processed/Consumer_*"  # HFL 客戶端數據模式
+  input_length: 96                    # 輸入序列長度
+  output_length: 1                    # 輸出序列長度
+
+  # Weather 特徵 (雲端)
+  weather_features:
+    - 'TemperatureC'
+    - 'DewpointC'
+    - 'PressurehPa'
+    - 'WindSpeedKMH'
+    - 'WindSpeedGustKMH'
+    - 'Humidity'
+    - 'HourlyPrecipMM'
+    - 'dailyrainMM'
+    - 'SolarRadiationWatts_m2'
+
+  # HFL 特徵 (本地)
+  hfl_features:
+    - 'AC1'
+    - 'AC2'
+    - 'AC3'
+    - 'AC4'
+    - 'Dish washer'
+    - 'Washing Machine'
+    - 'Dryer'
+    - 'Water heater'
+    - 'TV'
+    - 'Microwave'
+    - 'Kettle'
+    - 'Lighting'
+    - 'Refrigerator'
+    - 'Consumption_Total'
+
+  # 目標變量 (本地客戶端)
+  target: ["Power_Demand"]
+
+  # 數據分割比例
+  train_ratio: 0.8         # 訓練集比例
+  val_ratio: 0.1           # 驗證集比例
+  test_ratio: 0.1          # 測試集比例
+
+# 訓練配置
+training:
+  early_stopping:
+    patience: 15           # 早停耐心值
+    min_delta: 0.001       # 最小改善閾值
+
+# 設備配置
+device:
+  type: "auto"             # 自動選擇設備: "cuda", "mps", "cpu"
+
+# 日誌配置
+logging:
+  save_model: true         # 是否保存模型
+  model_save_path: "checkpoints"
+  log_level: "INFO"
+
+# Per-FedAvg 個性化配置 (用於初始化 HFL 模型)
+personalization:
+  use_personalized_hfl: true           # 是否使用個性化的 HFL 模型
+  hfl_model_path: "HFL_global_model.pth"  # HFL 全局模型路徑
+  personalization_steps: 10            # 個性化適應步數
+  adaptation_lr: 0.01                  # 個性化適應學習率
+
+# 可視化配置
+visualization:
+  save_plots: true         # 是否保存圖表
+  plot_path: "plots"       # 圖表保存路徑
+  save_only: true          # 僅保存圖表，不顯示
