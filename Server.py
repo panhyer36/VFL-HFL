@@ -56,6 +56,35 @@ class VFLServer:
             dropout=config.weather_dropout
         ).to(device)
 
+        # === 載入 SSL 預訓練權重 (可選) ===
+        if hasattr(config, 'use_ssl_pretrain') and config.use_ssl_pretrain:
+            if hasattr(config, 'ssl_pretrain_path') and config.ssl_pretrain_path:
+                import os
+                ssl_path = config.ssl_pretrain_path
+                if os.path.exists(ssl_path):
+                    try:
+                        print(f"\n載入 SSL 預訓練權重:")
+                        print(f"  - 路徑: {ssl_path}")
+
+                        ssl_state_dict = torch.load(ssl_path, map_location=device)
+
+                        # 載入權重 (允許部分匹配)
+                        model_dict = self.global_weather_model.state_dict()
+                        pretrained_dict = {k: v for k, v in ssl_state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
+
+                        if pretrained_dict:
+                            model_dict.update(pretrained_dict)
+                            self.global_weather_model.load_state_dict(model_dict)
+                            print(f"  ✓ 成功載入 {len(pretrained_dict)}/{len(ssl_state_dict)} 個權重層")
+                        else:
+                            print(f"  ⚠ 無匹配的權重層，使用隨機初始化")
+                    except Exception as e:
+                        print(f"  ⚠ 載入 SSL 權重失敗: {e}")
+                        print(f"  → 使用隨機初始化")
+                else:
+                    print(f"\n  ⚠ SSL 預訓練權重不存在: {ssl_path}")
+                    print(f"  → 使用隨機初始化")
+
         # 統計模型參數
         total_params = sum(p.numel() for p in self.global_weather_model.parameters())
         trainable_params = sum(p.numel() for p in self.global_weather_model.parameters() if p.requires_grad)

@@ -284,11 +284,80 @@ def train(args):
         print("Per-FedAvg 個性化 HFL 模型初始化")
         print(f"{'=' * 70}")
         try:
-            # 這裡簡化處理，實際應該從 PerFedAvgHVP 專案獲取
-            print(f"  ⚠ Per-FedAvg 個性化功能需要先運行 PerFedAvgHVP 訓練")
-            print(f"  → 當前使用隨機初始化的 HFL 模型")
+            import torch
+            from Model import TransformerModel
+            from DataLoader import SequenceCSVDataset
+
+            # 檢查 HFL 全局模型是否存在
+            if os.path.exists(config.hfl_model_path):
+                print(f"  ✓ 找到 HFL 全局模型: {config.hfl_model_path}")
+
+                # 創建 HFL 模型架構
+                global_hfl_model = TransformerModel(
+                    feature_dim=config.hfl_feature_dim,
+                    d_model=config.hfl_d_model,
+                    nhead=config.hfl_nhead,
+                    num_layers=config.hfl_num_layers,
+                    output_dim=config.hfl_output_dim,
+                    max_seq_length=config.hfl_max_seq_length,
+                    dropout=config.hfl_dropout
+                ).to(device)
+
+                # 載入全局模型權重
+                global_hfl_model.load_state_dict(torch.load(config.hfl_model_path, map_location=device))
+                print(f"  ✓ 成功載入 HFL 全局模型權重")
+
+                # 為每個客戶端進行個性化適應
+                print(f"\n  開始為每個客戶端進行個性化適應...")
+                print(f"  適應參數: lr={config.adaptation_lr}, steps={config.personalization_steps}")
+                print()
+
+                for i, csv_file in enumerate(client_csv_files):
+                    client_name = os.path.basename(csv_file).replace('.csv', '')
+                    print(f"  [{i+1}/{len(client_csv_files)}] {client_name}:")
+
+                    # 載入客戶端數據集 (用於個性化)
+                    try:
+                        client_dataset = SequenceCSVDataset(
+                            csv_path=os.path.dirname(csv_file),
+                            csv_name=client_name,
+                            input_len=config.input_length,
+                            output_len=config.output_length,
+                            features=config.hfl_features,
+                            target=config.target,
+                            save_path=os.path.dirname(csv_file),
+                            train_ratio=config.train_ratio,
+                            val_ratio=config.val_ratio,
+                            split_type='time_based',
+                            fit_scalers=False  # 使用已保存的標準化器
+                        )
+
+                        # 使用 Personalizer 進行個性化適應
+                        from Personalizer import personalize_model_for_client
+                        personalized_state = personalize_model_for_client(
+                            global_model=global_hfl_model,
+                            dataset=client_dataset,
+                            config=config,
+                            client_name=client_name
+                        )
+
+                        # 保存個性化後的模型權重
+                        client_hfl_models[client_name] = personalized_state
+
+                    except Exception as e:
+                        print(f"    ⚠ 個性化失敗: {e}")
+                        print(f"    → 使用全局模型權重")
+                        client_hfl_models[client_name] = global_hfl_model.state_dict()
+
+                print(f"\n  ✓ 已為 {len(client_hfl_models)} 個客戶端完成個性化適應")
+            else:
+                print(f"  ⚠ HFL 全局模型文件不存在: {config.hfl_model_path}")
+                print(f"  → 將使用隨機初始化的 HFL 模型")
         except Exception as e:
-            print(f"  ⚠ 載入 Per-FedAvg 模型失敗: {e}")
+            import traceback
+            print(f"  ⚠ 載入/個性化 HFL 模型失敗: {e}")
+            print(traceback.format_exc())
+            print(f"  → 將使用隨機初始化的 HFL 模型")
 
     # === 步驟 5: 初始化 Server 和 Clients ===
     print(f"\n{'=' * 70}")

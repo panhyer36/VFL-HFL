@@ -4,8 +4,8 @@
 federated_learning:
   algorithm: "vfl_fedavg"  # VFL 聯邦平均算法
   global_rounds: 100       # 全局訓練輪數
-  client_fraction: 1.0     # 參與訓練的客戶端比例 (VFL通常是全體參與)
-  num_clients: 5           # 客戶端數量 (Consumer_01 到 Consumer_05)
+  client_fraction: 0.34    # 參與訓練的客戶端比例 (每次 int(15*0.34)=5 個客戶端)
+  num_clients: 15          # 客戶端數量 (Consumer_01 到 Consumer_14 + Public_Building)
   eval_interval: 10        # 評估間隔
 
   # 訓練策略配置
@@ -18,7 +18,7 @@ federated_learning:
 local_training:
   local_epochs: 1          # 本地訓練輪數 (VFL每輪通常是1個epoch)
   learning_rate: 0.001     # 學習率
-  batch_size: 32           # 批次大小
+  batch_size: 16           # 批次大小 (降低以節省記憶體)
 
 # 模型配置 - Weather Model (雲端)
 weather_model:
@@ -29,6 +29,8 @@ weather_model:
   output_dim: null         # VFL不需要輸出層，只輸出嵌入
   max_seq_length: 100      # 最大序列長度
   dropout: 0.1             # Dropout率
+  use_ssl_pretrain: true   # 是否使用 SSL 預訓練權重
+  ssl_pretrain_path: "ssl_pretrain.pt"  # SSL 預訓練權重路徑
 
 # 模型配置 - HFL Model (本地客戶端)
 hfl_model:
@@ -53,7 +55,7 @@ fusion_model:
 data:
   data_path: "data"
   weather_csv: "Weather"              # Weather 數據文件名 (不含.csv)
-  hfl_csv_pattern: "processed/Consumer_*"  # HFL 客戶端數據模式
+  hfl_csv_pattern: "processed/{Consumer_*,Public_Building}"  # HFL 客戶端數據模式 (包含所有Consumer和Public_Building)
   input_length: 96                    # 輸入序列長度
   output_length: 1                    # 輸出序列長度
 
