@@ -373,17 +373,17 @@ def train(args):
                         client_hfl_models[client_name] = personalized_state
 
                     except Exception as e:
-                        print(f"    ⚠ Personalization failed: {e}")
+                        print(f"    ! Personalization failed: {e}")
                         print(f"    -> Using global model weights")
                         client_hfl_models[client_name] = global_hfl_model.state_dict()
 
                 print(f"\n  V Completed personalization adaptation for {len(client_hfl_models)} clients")
             else:
-                print(f"  ⚠ HFL global model file not found: {config.hfl_model_path}")
+                print(f"  ! HFL global model file not found: {config.hfl_model_path}")
                 print(f"  -> Will use randomly initialized HFL model")
         except Exception as e:
             import traceback
-            print(f"  ⚠ Failed to load/personalize HFL model: {e}")
+            print(f"  ! Failed to load/personalize HFL model: {e}")
             print(traceback.format_exc())
             print(f"  -> Will use randomly initialized HFL model")
 

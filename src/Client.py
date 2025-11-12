@@ -74,7 +74,7 @@ class VFLClient:
             self.hfl_model.load_state_dict(hfl_model_state_dict)
             print(f"  V Loaded Per-FedAvg personalized HFL model")
         else:
-            print(f"  ⚠ Using randomly initialized HFL model")
+            print(f"  ! Using randomly initialized HFL model")
 
         # 凍結 HFL Model
         if config.freeze_hfl:

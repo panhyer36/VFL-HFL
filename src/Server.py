@@ -84,12 +84,12 @@ class VFLServer:
                             self.global_weather_model.load_state_dict(model_dict)
                             print(f"  V Successfully loaded {len(pretrained_dict)}/{len(ssl_state_dict)} weight layers")
                         else:
-                            print(f"  ⚠ No matching weight layers, using random initialization")
+                            print(f"  ! No matching weight layers, using random initialization")
                     except Exception as e:
-                        print(f"  ⚠ Failed to load SSL weights: {e}")
+                        print(f"  ! Failed to load SSL weights: {e}")
                         print(f"  -> Using random initialization")
                 else:
-                    print(f"\n  ⚠ SSL pretrained weights not found: {ssl_path}")
+                    print(f"\n  ! SSL pretrained weights not found: {ssl_path}")
                     print(f"  -> Using random initialization")
 
         # 統計模型參數

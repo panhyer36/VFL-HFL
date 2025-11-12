@@ -156,7 +156,7 @@ def personalize_model_for_client(
         support_targets.append(targets)
 
     if not support_inputs:
-        print(f"  ⚠ {client_name}: No validation data, returning global model")
+        print(f"  ! {client_name}: No validation data, returning global model")
         return global_model.state_dict()
 
     # 合併批次
