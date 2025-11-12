@@ -74,15 +74,15 @@ def load_weather_data(config):
         weather_scaler: Weather 標準化器
     """
     print(f"\n{'=' * 70}")
-    print("載入 Weather 數據 (雲端)")
+    print("Loading Weather Data (Cloud)")
     print(f"{'=' * 70}")
 
     # 讀取 Weather CSV
     weather_csv_path = os.path.join(config.data_path, f"{config.weather_csv}.csv")
     weather_df = pd.read_csv(weather_csv_path)
 
-    print(f"  - Weather 原始數據形狀: {weather_df.shape}")
-    print(f"  - Weather 特徵數: {len(config.weather_features)}")
+    print(f"  - Weather raw data shape: {weather_df.shape}")
+    print(f"  - Number of Weather features: {len(config.weather_features)}")
 
     # 提取 Weather 特徵
     weather_data_raw = weather_df[config.weather_features].values
@@ -94,18 +94,18 @@ def load_weather_data(config):
         # 載入已有的標準化器
         with open(weather_scaler_path, 'rb') as f:
             weather_scaler = pickle.load(f)
-        print(f"  ✓ Weather 標準化器已載入")
+        print(f"  ✓ Weather scaler loaded")
     else:
         # 創建新的標準化器
         weather_scaler = StandardScaler()
         weather_scaler.fit(weather_data_raw)
         with open(weather_scaler_path, 'wb') as f:
             pickle.dump(weather_scaler, f)
-        print(f"  ✓ Weather 標準化器已創建並保存")
+        print(f"  ✓ Weather scaler created and saved")
 
     # 標準化
     weather_data_scaled = weather_scaler.transform(weather_data_raw)
-    print(f"  ✓ Weather 數據已標準化: {weather_data_scaled.shape}")
+    print(f"  ✓ Weather data normalized: {weather_data_scaled.shape}")
 
     return weather_data_scaled, weather_scaler
 
@@ -143,7 +143,7 @@ def load_client_data(config, weather_sequences, client_csv_files):
         target_scaler: 目標變量標準化器
     """
     print(f"\n{'=' * 70}")
-    print("載入客戶端數據 (本地)")
+    print("Loading Client Data (Local)")
     print(f"{'=' * 70}")
 
     from src.DataLoader import SequenceCSVDataset
@@ -162,7 +162,7 @@ def load_client_data(config, weather_sequences, client_csv_files):
         client_name = os.path.basename(csv_file).replace('.csv', '')
         client_names.append(client_name)
 
-        print(f"\n客戶端 [{idx + 1}/{len(client_csv_files)}]: {client_name}")
+        print(f"\nClient [{idx + 1}/{len(client_csv_files)}]: {client_name}")
 
         # 讀取客戶端數據
         client_df = pd.read_csv(csv_file)
@@ -241,9 +241,9 @@ def load_client_data(config, weather_sequences, client_csv_files):
             'train_size': len(train_dataset)
         }
 
-        print(f"  ✓ 訓練樣本: {len(train_dataset)}, 驗證樣本: {len(val_dataset)}")
+        print(f"  ✓ Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
-    print(f"\n總共載入 {len(client_dataloaders)} 個客戶端")
+    print(f"\nTotal loaded {len(client_dataloaders)} clients")
     return client_dataloaders, client_names, target_scaler
 
 
@@ -255,20 +255,20 @@ def train(args):
         args: 命令行參數
     """
     print("\n" + "=" * 70)
-    print("VFL 垂直聯邦學習訓練 - FedAvg")
+    print("VFL Vertical Federated Learning Training - FedAvg")
     print("=" * 70)
 
     # === 步驟 1: 載入配置 ===
     config = load_config(args.config)
     device = config.device
 
-    print(f"\n配置摘要:")
-    print(f"  - 演算法: {config.algorithm}")
-    print(f"  - 全局輪數: {config.K}")
-    print(f"  - 客戶端數: {config.num_users}")
-    print(f"  - 批次大小: {config.batch_size}")
-    print(f"  - 學習率: {config.beta}")
-    print(f"  - 設備: {device}")
+    print(f"\nConfiguration Summary:")
+    print(f"  - Algorithm: {config.algorithm}")
+    print(f"  - Total rounds: {config.K}")
+    print(f"  - Number of clients: {config.num_users}")
+    print(f"  - Batch size: {config.batch_size}")
+    print(f"  - Learning rate: {config.beta}")
+    print(f"  - Device: {device}")
 
     # === 步驟 2: 載入 Weather 數據 ===
     weather_data_scaled, weather_scaler = load_weather_data(config)
@@ -282,9 +282,9 @@ def train(args):
     client_csv_files = [f for f in all_files if f.endswith('.csv') and not '.pkl' in f][:config.num_users]
 
     if not client_csv_files:
-        raise FileNotFoundError(f"未找到客戶端數據: {csv_pattern}")
+        raise FileNotFoundError(f"Client data not found: {csv_pattern}")
 
-    print(f"\n找到 {len(client_csv_files)} 個客戶端文件")
+    print(f"\nFound {len(client_csv_files)} client files")
 
     # 創建 Weather 序列 (與第一個客戶端對齊)
     # 這裡先估算序列數量
@@ -296,7 +296,7 @@ def train(args):
         total_hfl_sequences
     )
 
-    print(f"\nWeather 序列已創建: {weather_sequences.shape}")
+    print(f"\nWeather sequences created: {weather_sequences.shape}")
 
     # 載入所有客戶端數據
     client_dataloaders, client_names, target_scaler = load_client_data(
@@ -309,7 +309,7 @@ def train(args):
     client_hfl_models = {}
     if config.use_personalized_hfl and config.hfl_model_path:
         print(f"\n{'=' * 70}")
-        print("Per-FedAvg 個性化 HFL 模型初始化")
+        print("Per-FedAvg Personalized HFL Model Initialization")
         print(f"{'=' * 70}")
         try:
             import torch
@@ -318,7 +318,7 @@ def train(args):
 
             # 檢查 HFL 全局模型是否存在
             if os.path.exists(config.hfl_model_path):
-                print(f"  ✓ 找到 HFL 全局模型: {config.hfl_model_path}")
+                print(f"  ✓ Found HFL global model: {config.hfl_model_path}")
 
                 # 創建 HFL 模型架構
                 global_hfl_model = TransformerModel(
@@ -333,11 +333,11 @@ def train(args):
 
                 # 載入全局模型權重
                 global_hfl_model.load_state_dict(torch.load(config.hfl_model_path, map_location=device))
-                print(f"  ✓ 成功載入 HFL 全局模型權重")
+                print(f"  ✓ Successfully loaded HFL global model weights")
 
                 # 為每個客戶端進行個性化適應
-                print(f"\n  開始為每個客戶端進行個性化適應...")
-                print(f"  適應參數: lr={config.adaptation_lr}, steps={config.personalization_steps}")
+                print(f"\n  Starting personalization adaptation for each client...")
+                print(f"  Adaptation parameters: lr={config.adaptation_lr}, steps={config.personalization_steps}")
                 print()
 
                 for i, csv_file in enumerate(client_csv_files):
@@ -373,23 +373,23 @@ def train(args):
                         client_hfl_models[client_name] = personalized_state
 
                     except Exception as e:
-                        print(f"    ⚠ 個性化失敗: {e}")
-                        print(f"    → 使用全局模型權重")
+                        print(f"    ⚠ Personalization failed: {e}")
+                        print(f"    -> Using global model weights")
                         client_hfl_models[client_name] = global_hfl_model.state_dict()
 
-                print(f"\n  ✓ 已為 {len(client_hfl_models)} 個客戶端完成個性化適應")
+                print(f"\n  ✓ Completed personalization adaptation for {len(client_hfl_models)} clients")
             else:
-                print(f"  ⚠ HFL 全局模型文件不存在: {config.hfl_model_path}")
-                print(f"  → 將使用隨機初始化的 HFL 模型")
+                print(f"  ⚠ HFL global model file not found: {config.hfl_model_path}")
+                print(f"  -> Will use randomly initialized HFL model")
         except Exception as e:
             import traceback
-            print(f"  ⚠ 載入/個性化 HFL 模型失敗: {e}")
+            print(f"  ⚠ Failed to load/personalize HFL model: {e}")
             print(traceback.format_exc())
-            print(f"  → 將使用隨機初始化的 HFL 模型")
+            print(f"  -> Will use randomly initialized HFL model")
 
     # === 步驟 5: 初始化 Server 和 Clients ===
     print(f"\n{'=' * 70}")
-    print("初始化 VFL Server 和 Clients")
+    print("Initializing VFL Server and Clients")
     print(f"{'=' * 70}")
 
     # 初始化 Server
@@ -409,31 +409,31 @@ def train(args):
 
     # === 步驟 6: 聯邦學習訓練循環 ===
     print(f"\n{'=' * 70}")
-    print("開始聯邦學習訓練...")
-    send_message("開始聯邦學習訓練...")
+    print("Starting Federated Learning Training...")
+    send_message("Starting Federated Learning Training...")
     print(f"{'=' * 70}")
 
     for round_idx in range(config.K):
         server.current_round = round_idx
 
         print(f"\n{'─' * 70}")
-        print(f"聯邦學習輪次 [{round_idx + 1}/{config.K}]")
+        print(f"Federated Learning Round [{round_idx + 1}/{config.K}]")
         print(f"{'─' * 70}")
 
         # 確定訓練策略
         train_weather = server.should_update_weather()
 
         if train_weather:
-            print(f"  訓練模式: Fusion Model + Weather Model ⚡")
+            print(f"  Training mode: Fusion Model + Weather Model ⚡")
         else:
-            print(f"  訓練模式: Fusion Model only (節省通訊) 📡")
+            print(f"  Training mode: Fusion Model only (Save communication) 📡")
 
         # 客戶端選擇
         selected_clients = server.select_clients(client_names)
-        print(f"\n  選中客戶端: {selected_clients}")
+        print(f"\n  Selected clients: {selected_clients}")
 
         # === Split Learning 前向傳播: Server 計算 Weather 嵌入 ===
-        print(f"\n  Server 計算 Weather 嵌入向量:")
+        print(f"\n  Server computing Weather embeddings:")
 
         # 收集所有選中客戶端的 Weather 數據
         client_weather_data = {}
@@ -486,7 +486,7 @@ def train(args):
         client_embedding_gradients = []
         client_sample_counts = []
 
-        print(f"\n  本地訓練 (Client 端):")
+        print(f"\n  Local training (Client side):")
         for client_name in selected_clients:
             client = clients[client_name]
             train_loader = client_dataloaders[client_name]['train']
@@ -516,7 +516,7 @@ def train(args):
 
         # === Server 聚合 Embedding 梯度並更新 Weather Model ===
         if train_weather and client_embedding_gradients:
-            print(f"\n  Server 聚合 Embedding 梯度並更新 Weather Model (Split Learning + FedAvg):")
+            print(f"\n  Server aggregating Embedding gradients and updating Weather Model (Split Learning + FedAvg):")
 
             # 使用第一個客戶端的 Weather 數據進行反向傳播 (所有客戶端共享相同的 Weather 數據)
             representative_client = selected_clients[0]
@@ -527,32 +527,32 @@ def train(args):
                 client_embedding_gradients,
                 client_sample_counts
             )
-            print(f"    ✓ 全局 Weather Model 已更新 (Chain Rule)")
-            print(f"    - 參與客戶端: {len(client_embedding_gradients)}")
+            print(f"    ✓ Global Weather Model updated (Chain Rule)")
+            print(f"    - Participating clients: {len(client_embedding_gradients)}")
 
         # 全局評估
         avg_train_loss = sum(client_losses) / len(client_losses)
         avg_val_loss = sum(client_val_losses) / len(client_val_losses)
 
-        print(f"\n  【本輪結果】")
-        print(f"    平均訓練損失: {avg_train_loss:.6f}")
-        print(f"    平均驗證損失: {avg_val_loss:.6f}")
+        print(f"\n  [Round Results]")
+        print(f"    Average train loss: {avg_train_loss:.6f}")
+        print(f"    Average val loss: {avg_val_loss:.6f}")
 
         # 早停檢查
         should_stop = server.evaluate_global(avg_train_loss, avg_val_loss, selected_clients)
         if should_stop:
-            print(f"\n早停觸發，訓練結束於第 {round_idx + 1} 輪")
+            print(f"\nEarly stopping triggered, training ended at round {round_idx + 1}")
             break
 
         # 定期評估
         if (round_idx + 1) % config.eval_interval == 0:
-            print(f"\n  【評估摘要 - 第 {round_idx + 1} 輪】")
-            print(f"    最佳驗證損失: {server.best_val_loss:.6f}")
-            print(f"    早停計數: {server.patience_counter}/{config.early_stopping_patience}")
+            print(f"\n  [Evaluation Summary - Round {round_idx + 1}]")
+            print(f"    Best val loss: {server.best_val_loss:.6f}")
+            print(f"    Early stopping counter: {server.patience_counter}/{config.early_stopping_patience}")
 
     # === 步驟 7: 保存模型 ===
     print(f"\n{'=' * 70}")
-    print("保存模型...")
+    print("Saving models...")
     print(f"{'=' * 70}")
 
     server.save_final_model()
@@ -564,24 +564,24 @@ def train(args):
             f"{client_name}_fusion_model.pth"
         )
         client.save_fusion_model(fusion_path)
-        print(f"  ✓ {client_name} Fusion Model 已保存")
+        print(f"  ✓ {client_name} Fusion Model saved")
 
     # === 步驟 8: 訓練摘要 ===
     summary = server.get_training_summary()
 
     print(f"\n{'=' * 70}")
-    print("訓練完成！")
-    send_message("訓練完成！")
+    print("Training completed!")
+    send_message("Training completed!")
     print(f"{'=' * 70}")
-    print(f"\n訓練摘要:")
-    print(f"  - 總輪數: {summary['total_rounds']}")
-    print(f"  - Weather Model 更新次數: {summary['weather_updates']}")
-    print(f"  - 實際通訊節省: {summary['comm_saving_actual']:.1f}%")
-    print(f"  - 最佳驗證損失: {summary['best_val_loss']:.6f}")
-    print(f"  - 最終訓練損失: {summary['final_train_loss']:.6f}")
-    print(f"  - 最終驗證損失: {summary['final_val_loss']:.6f}")
+    print(f"\nTraining Summary:")
+    print(f"  - Total rounds: {summary['total_rounds']}")
+    print(f"  - Weather Model updates: {summary['weather_updates']}")
+    print(f"  - Actual communication saving: {summary['comm_saving_actual']:.1f}%")
+    print(f"  - Best val loss: {summary['best_val_loss']:.6f}")
+    print(f"  - Final train loss: {summary['final_train_loss']:.6f}")
+    print(f"  - Final val loss: {summary['final_val_loss']:.6f}")
 
-    print(f"\n模型已保存到: {config.model_save_path}/")
+    print(f"\nModels saved to: {config.model_save_path}/")
     print("=" * 70)
 
 

@@ -58,10 +58,10 @@ def load_global_model(config, model_path: str) -> TransformerModel:
 
     # 載入訓練好的權重
     if not os.path.exists(model_path):
-        raise FileNotFoundError(f"全局模型文件不存在: {model_path}")
+        raise FileNotFoundError(f"Global model file not found: {model_path}")
 
     model.load_state_dict(torch.load(model_path, map_location=config.device))
-    print(f"✓ 成功載入全局模型: {model_path}")
+    print(f"✓ Successfully loaded global model: {model_path}")
 
     return model
 
@@ -87,7 +87,7 @@ def load_client_datasets(config) -> Tuple[List[SequenceCSVDataset], List[str]]:
     csv_pattern = os.path.join(config.data_path, "*.csv")
     csv_files = sorted(glob.glob(csv_pattern))
 
-    print(f"\n正在載入客戶端數據...")
+    print(f"\nLoading client datasets...")
     for csv_file in csv_files:
         csv_name = os.path.splitext(os.path.basename(csv_file))[0]
 
@@ -109,11 +109,11 @@ def load_client_datasets(config) -> Tuple[List[SequenceCSVDataset], List[str]]:
             if len(dataset) > 0:
                 datasets.append(dataset)
                 client_names.append(csv_name)
-                print(f"  ✓ {csv_name}: {len(dataset)} 樣本")
+                print(f"  ✓ {csv_name}: {len(dataset)} samples")
         except Exception as e:
-            print(f"  ✗ {csv_name}: 載入失敗 - {e}")
+            print(f"  ✗ {csv_name}: Failed to load - {e}")
 
-    print(f"成功載入 {len(datasets)} 個客戶端數據集")
+    print(f"Successfully loaded {len(datasets)} client datasets")
     return datasets, client_names
 
 
@@ -156,14 +156,14 @@ def personalize_model_for_client(
         support_targets.append(targets)
 
     if not support_inputs:
-        print(f"  ⚠ {client_name}: 沒有 validation 數據，返回全局模型")
+        print(f"  ⚠ {client_name}: No validation data, returning global model")
         return global_model.state_dict()
 
     # 合併批次
     support_inputs = torch.cat(support_inputs, dim=0).to(config.device)
     support_targets = torch.cat(support_targets, dim=0).to(config.device)
 
-    print(f"  {client_name}: 使用 {len(support_inputs)} 個樣本進行個性化適應...")
+    print(f"  {client_name}: Using {len(support_inputs)} samples for personalization adaptation...")
 
     # 創建模型副本
     personalized_model = deepcopy(global_model)
@@ -195,7 +195,7 @@ def personalize_model_for_client(
 
     # 輸出適應效果
     improvement = ((initial_loss - final_loss) / initial_loss * 100) if initial_loss > 0 else 0
-    print(f"    初始損失: {initial_loss:.4f} → 最終損失: {final_loss:.4f} (改善: {improvement:.2f}%)")
+    print(f"    Initial loss: {initial_loss:.4f} -> Final loss: {final_loss:.4f} (Improvement: {improvement:.2f}%)")
 
     # 返回個性化模型的狀態字典
     return personalized_model.state_dict()
@@ -258,7 +258,7 @@ def initialize_personalized_models(
         config = load_config(config)
 
     print("=" * 70)
-    print("Per-FedAvg 個性化模型初始化器")
+    print("Per-FedAvg Personalized Model Initializer")
     print("=" * 70)
 
     # 確定模型路徑
@@ -266,22 +266,22 @@ def initialize_personalized_models(
         model_path = os.path.join(config.model_save_path, "final_global_model.pth")
 
     # 載入全局模型
-    print(f"\n【步驟 1】載入全局模型")
+    print(f"\n[Step 1] Loading global model")
     global_model = load_global_model(config, model_path)
 
     # 載入客戶端數據
-    print(f"\n【步驟 2】載入客戶端數據")
+    print(f"\n[Step 2] Loading client datasets")
     datasets, client_names = load_client_datasets(config)
 
     if not datasets:
-        raise ValueError("沒有找到任何客戶端數據集！")
+        raise ValueError("No client datasets found!")
 
     # 為每個客戶端進行個性化
-    print(f"\n【步驟 3】為每個客戶端進行個性化適應")
-    print(f"適應參數:")
-    print(f"  - 學習率: {config.adaptation_lr}")
-    print(f"  - 適應步數: {config.personalization_steps}")
-    print(f"  - 設備: {config.device}")
+    print(f"\n[Step 3] Personalizing models for each client")
+    print(f"Adaptation parameters:")
+    print(f"  - Learning rate: {config.adaptation_lr}")
+    print(f"  - Adaptation steps: {config.personalization_steps}")
+    print(f"  - Device: {config.device}")
     print()
 
     client_models = {}
@@ -296,8 +296,8 @@ def initialize_personalized_models(
         client_models[client_name] = state_dict
 
     # 總結
-    print(f"\n【完成】成功初始化 {len(client_models)} 個客戶端的個性化模型")
-    print(f"客戶端列表: {list(client_models.keys())}")
+    print(f"\n[Complete] Successfully initialized personalized models for {len(client_models)} clients")
+    print(f"Client list: {list(client_models.keys())}")
     print("=" * 70)
 
     return client_models
@@ -318,13 +318,13 @@ def save_personalized_models(
     """
     os.makedirs(save_dir, exist_ok=True)
 
-    print(f"\n保存個性化模型到: {save_dir}")
+    print(f"\nSaving personalized models to: {save_dir}")
     for client_name, state_dict in client_models.items():
         save_path = os.path.join(save_dir, f"{client_name}_personalized.pth")
         torch.save(state_dict, save_path)
-        print(f"  ✓ {client_name} → {save_path}")
+        print(f"  ✓ {client_name} -> {save_path}")
 
-    print(f"成功保存 {len(client_models)} 個模型")
+    print(f"Successfully saved {len(client_models)} models")
 
 
 # ============================================================================
@@ -361,13 +361,13 @@ if __name__ == "__main__":
     # 保存模型
     save_personalized_models(client_models, args.save_dir)
 
-    print("\n✓ 個性化模型初始化完成！")
-    print("\n使用方式:")
+    print("\n✓ Personalized model initialization completed!")
+    print("\nUsage:")
     print("```python")
     print("from Model import TransformerModel")
     print("import torch")
     print()
-    print("# 載入特定客戶端的個性化模型")
+    print("# Load personalized model for a specific client")
     print("model = TransformerModel(...)")
     print(f"model.load_state_dict(torch.load('personalized_models/client_name_personalized.pth'))")
     print("```")

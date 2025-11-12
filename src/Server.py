@@ -43,7 +43,7 @@ class VFLServer:
 
         # === 初始化全局 Weather Model (雲端) ===
         print("=" * 70)
-        print("VFL Server 初始化")
+        print("VFL Server Initialization")
         print("=" * 70)
 
         self.global_weather_model = TransformerModel(
@@ -63,15 +63,15 @@ class VFLServer:
                 ssl_path = config.ssl_pretrain_path
                 if os.path.exists(ssl_path):
                     try:
-                        print(f"\n載入 SSL 預訓練權重:")
-                        print(f"  - 路徑: {ssl_path}")
+                        print(f"\nLoading SSL pretrained weights:")
+                        print(f"  - Path: {ssl_path}")
 
                         ssl_checkpoint = torch.load(ssl_path, map_location=device)
 
                         # 處理 checkpoint 格式 (包含 model_state_dict key)
                         if isinstance(ssl_checkpoint, dict) and 'model_state_dict' in ssl_checkpoint:
                             ssl_state_dict = ssl_checkpoint['model_state_dict']
-                            print(f"  - 檢測到 checkpoint 格式，提取 model_state_dict")
+                            print(f"  - Detected checkpoint format, extracting model_state_dict")
                         else:
                             ssl_state_dict = ssl_checkpoint
 
@@ -82,28 +82,28 @@ class VFLServer:
                         if pretrained_dict:
                             model_dict.update(pretrained_dict)
                             self.global_weather_model.load_state_dict(model_dict)
-                            print(f"  ✓ 成功載入 {len(pretrained_dict)}/{len(ssl_state_dict)} 個權重層")
+                            print(f"  ✓ Successfully loaded {len(pretrained_dict)}/{len(ssl_state_dict)} weight layers")
                         else:
-                            print(f"  ⚠ 無匹配的權重層，使用隨機初始化")
+                            print(f"  ⚠ No matching weight layers, using random initialization")
                     except Exception as e:
-                        print(f"  ⚠ 載入 SSL 權重失敗: {e}")
-                        print(f"  → 使用隨機初始化")
+                        print(f"  ⚠ Failed to load SSL weights: {e}")
+                        print(f"  -> Using random initialization")
                 else:
-                    print(f"\n  ⚠ SSL 預訓練權重不存在: {ssl_path}")
-                    print(f"  → 使用隨機初始化")
+                    print(f"\n  ⚠ SSL pretrained weights not found: {ssl_path}")
+                    print(f"  -> Using random initialization")
 
         # 統計模型參數
         total_params = sum(p.numel() for p in self.global_weather_model.parameters())
         trainable_params = sum(p.numel() for p in self.global_weather_model.parameters() if p.requires_grad)
 
-        print(f"\n全局 Weather Model (雲端):")
-        print(f"  - 特徵維度: {config.weather_feature_dim}")
-        print(f"  - 模型維度: {config.weather_d_model}")
-        print(f"  - 注意力頭數: {config.weather_nhead}")
-        print(f"  - Transformer層數: {config.weather_num_layers}")
-        print(f"  - 總參數量: {total_params:,}")
-        print(f"  - 可訓練參數: {trainable_params:,}")
-        print(f"  - 設備: {device}")
+        print(f"\nGlobal Weather Model (Cloud):")
+        print(f"  - Feature dimension: {config.weather_feature_dim}")
+        print(f"  - Model dimension: {config.weather_d_model}")
+        print(f"  - Number of attention heads: {config.weather_nhead}")
+        print(f"  - Number of Transformer layers: {config.weather_num_layers}")
+        print(f"  - Total parameters: {total_params:,}")
+        print(f"  - Trainable parameters: {trainable_params:,}")
+        print(f"  - Device: {device}")
 
         # === 全局優化器 ===
         self.global_optimizer = torch.optim.Adam(
@@ -124,11 +124,11 @@ class VFLServer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
 
-        print(f"\n訓練策略:")
-        print(f"  - 總輪數: {config.K}")
-        print(f"  - 階段1 ({config.phase1_rounds} 輪): 每輪都訓練 Fusion + Weather")
-        print(f"  - 階段2 ({config.phase2_rounds} 輪): {config.phase2_fusion_freq} 輪 Fusion，1 輪 Weather")
-        print(f"  - 通訊節省: {self._estimate_comm_saving():.1f}%")
+        print(f"\nTraining Strategy:")
+        print(f"  - Total rounds: {config.K}")
+        print(f"  - Phase 1 ({config.phase1_rounds} rounds): Train Fusion + Weather every round")
+        print(f"  - Phase 2 ({config.phase2_rounds} rounds): {config.phase2_fusion_freq} rounds Fusion, 1 round Weather")
+        print(f"  - Communication saving: {self._estimate_comm_saving():.1f}%")
         print("=" * 70)
 
     def _estimate_comm_saving(self):
@@ -354,7 +354,7 @@ class VFLServer:
         else:
             self.patience_counter += 1
             if self.patience_counter >= self.config.early_stopping_patience:
-                print(f"\n早停觸發 (patience={self.config.early_stopping_patience})")
+                print(f"\nEarly stopping triggered (patience={self.config.early_stopping_patience})")
                 should_stop = True
 
         return should_stop
@@ -376,7 +376,7 @@ class VFLServer:
             "final_weather_model.pth"
         )
         torch.save(self.global_weather_model.state_dict(), save_path)
-        print(f"\n最終模型已保存: {save_path}")
+        print(f"\nFinal model saved: {save_path}")
 
     def get_training_summary(self) -> Dict:
         """
