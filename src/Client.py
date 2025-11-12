@@ -55,7 +55,7 @@ class VFLClient:
         self.criterion = nn.MSELoss()
 
         print(f"\n{'=' * 70}")
-        print(f"VFL Client 初始化: {client_id}")
+        print(f"VFL Client Initialization: {client_id}")
         print(f"{'=' * 70}")
 
         # === 初始化 HFL Model (本地，凍結) ===
@@ -72,21 +72,21 @@ class VFLClient:
         # 載入 Per-FedAvg 個性化權重
         if hfl_model_state_dict is not None:
             self.hfl_model.load_state_dict(hfl_model_state_dict)
-            print(f"  ✓ 載入 Per-FedAvg 個性化 HFL 模型")
+            print(f"  ✓ Loaded Per-FedAvg personalized HFL model")
         else:
-            print(f"  ⚠ 使用隨機初始化的 HFL 模型")
+            print(f"  ⚠ Using randomly initialized HFL model")
 
         # 凍結 HFL Model
         if config.freeze_hfl:
             for param in self.hfl_model.parameters():
                 param.requires_grad = False
             self.hfl_model.eval()
-            print(f"  ✓ HFL Model 已凍結")
+            print(f"  ✓ HFL Model frozen")
 
         hfl_params = sum(p.numel() for p in self.hfl_model.parameters())
-        print(f"\nHFL Model (本地，凍結):")
-        print(f"  - 特徵維度: {config.hfl_feature_dim}")
-        print(f"  - 參數量: {hfl_params:,}")
+        print(f"\nHFL Model (Local, Frozen):")
+        print(f"  - Feature dimension: {config.hfl_feature_dim}")
+        print(f"  - Parameters: {hfl_params:,}")
 
         # === 初始化 Fusion Model (本地，可訓練) ===
         self.fusion_model = FusionModel(
@@ -98,10 +98,10 @@ class VFLClient:
         ).to(device)
 
         fusion_params = sum(p.numel() for p in self.fusion_model.parameters())
-        print(f"\nFusion Model (本地，可訓練):")
-        print(f"  - Weather 嵌入維度: {config.fusion_embedding_dim_weather}")
-        print(f"  - HFL 嵌入維度: {config.fusion_embedding_dim_hfl}")
-        print(f"  - 參數量: {fusion_params:,}")
+        print(f"\nFusion Model (Local, Trainable):")
+        print(f"  - Weather embedding dimension: {config.fusion_embedding_dim_weather}")
+        print(f"  - HFL embedding dimension: {config.fusion_embedding_dim_hfl}")
+        print(f"  - Parameters: {fusion_params:,}")
 
         # === 優化器 (只優化 Fusion Model) ===
         self.fusion_optimizer = torch.optim.Adam(
@@ -110,7 +110,7 @@ class VFLClient:
             weight_decay=1e-4
         )
 
-        print(f"\n設備: {device}")
+        print(f"\nDevice: {device}")
         print(f"{'=' * 70}")
 
     def local_train(
