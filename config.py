@@ -67,6 +67,9 @@ def load_config(config_path="config.yaml"):
     config.weather_output_dim = weather_config['output_dim']
     config.weather_max_seq_length = weather_config['max_seq_length']
     config.weather_dropout = weather_config['dropout']
+    # SSL 預訓練配置
+    config.use_ssl_pretrain = weather_config.get('use_ssl_pretrain', False)
+    config.ssl_pretrain_path = weather_config.get('ssl_pretrain_path', None)
 
     # === HFL Model 配置 (本地) ===
     hfl_config = config_dict['hfl_model']

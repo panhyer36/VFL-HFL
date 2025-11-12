@@ -66,7 +66,14 @@ class VFLServer:
                         print(f"\n載入 SSL 預訓練權重:")
                         print(f"  - 路徑: {ssl_path}")
 
-                        ssl_state_dict = torch.load(ssl_path, map_location=device)
+                        ssl_checkpoint = torch.load(ssl_path, map_location=device)
+
+                        # 處理 checkpoint 格式 (包含 model_state_dict key)
+                        if isinstance(ssl_checkpoint, dict) and 'model_state_dict' in ssl_checkpoint:
+                            ssl_state_dict = ssl_checkpoint['model_state_dict']
+                            print(f"  - 檢測到 checkpoint 格式，提取 model_state_dict")
+                        else:
+                            ssl_state_dict = ssl_checkpoint
 
                         # 載入權重 (允許部分匹配)
                         model_dict = self.global_weather_model.state_dict()
