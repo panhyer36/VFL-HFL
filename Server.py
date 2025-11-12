@@ -1,29 +1,28 @@
 """
-VFL Server 端模組 - 垂直聯邦學習協調器
+VFL Server 端模組 - 垂直聯邦學習協調器 (Split Learning 架構)
 
 **VFL Server 的職責**:
-1. 管理全局 Weather Model (雲端模型)
-2. 協調多個客戶端的訓練過程
-3. 聚合來自客戶端的梯度 (FedAvg)
-4. 分階段訓練策略: 平衡性能與通訊效率
+1. 管理全局 Weather Model (雲端模型，Client 無法訪問)
+2. 計算並分發 Weather 嵌入向量給 Clients
+3. 接收 Clients 回傳的 ∂L/∂embedding_weather
+4. 使用 Chain Rule 更新 Weather Model
+5. 分階段訓練策略: 平衡性能與通訊效率
 
-**與 HFL Server 的區別**:
-- HFL: 聚合多個客戶端的完整模型參數
-- VFL: 只訓練雲端的 Weather Model，客戶端保留 HFL + Fusion 模型
-- 通訊: VFL 只傳輸嵌入向量和梯度，不傳輸完整模型
+**Split Learning + FedAvg 架構**:
+- Weather Model 隔離: 只存在於 Server，Client 無法訪問
+- 前向傳播: Server 計算 Weather 嵌入 → 分發給 Clients
+- 反向傳播: Clients 計算 ∂L/∂embedding → Server 聚合並更新模型
+- FedAvg 聚合: 根據客戶端數據量加權平均 embedding 梯度
 
-**FedAvg 聚合策略**:
-- 加權平均: 根據客戶端數據量加權
-- 只聚合 Weather Model 的梯度
-- 支持部分客戶端參與 (client_fraction)
+**Chain Rule 梯度更新流程**:
+1. Server: weather_data → Weather_Model → embeddings → Clients
+2. Clients: 本地訓練 → ∂L/∂embedding → Server
+3. Server: FedAvg 聚合 → 反向傳播 → 更新 Weather Model
 """
 
 import torch
-import torch.nn as nn
-import numpy as np
 import random
-from copy import deepcopy
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from Model import TransformerModel
 
 
@@ -202,48 +201,90 @@ class VFLServer:
         self.global_optimizer.step()
         self.global_optimizer.zero_grad()
 
-    def update_weather_model(
+    def update_weather_model_from_embeddings(
         self,
-        client_gradients: List[List[torch.Tensor]],
+        weather_data: torch.Tensor,
+        client_embedding_gradients: List[torch.Tensor],
         client_sample_counts: List[int]
     ):
         """
-        更新全局 Weather Model (Server 端聚合)
+        使用 Chain Rule 更新全局 Weather Model (Split Learning)
 
         流程:
-        1. 收集所有客戶端的 Weather Model 梯度
+        1. 收集所有客戶端的 ∂L/∂embedding_weather
         2. 根據數據量進行加權平均 (FedAvg)
-        3. 應用聚合梯度到全局模型
-        4. 記錄更新歷史
+        3. Server 重新前向傳播計算 weather_embeddings
+        4. 使用聚合的 embedding 梯度進行反向傳播
+        5. 提取並應用 Weather Model 的參數梯度
 
         Args:
-            client_gradients: 客戶端梯度列表
+            weather_data: Weather 輸入數據 (用於重新計算嵌入)
+            client_embedding_gradients: 客戶端的 ∂L/∂embedding 列表
             client_sample_counts: 客戶端數據量列表
-        """
-        # FedAvg 聚合
-        aggregated_grads = self.aggregate_weather_gradients(
-            client_gradients,
-            client_sample_counts
-        )
 
-        # 應用聚合梯度
-        self.apply_aggregated_gradients(aggregated_grads)
+        Note:
+            plit Learning 梯度傳遞機制:
+            - Client: loss → ∂L/∂embedding (chain rule 第一步)
+            - Server: ∂L/∂embedding → ∂L/∂weather_params (chain rule 第二步)
+        """
+        # === 步驟 1: FedAvg 聚合 embedding 梯度 ===
+        total_weight = sum(client_sample_counts)
+        normalized_weights = [w / total_weight for w in client_sample_counts]
+
+        # 聚合所有客戶端的 embedding 梯度
+        aggregated_embedding_grad = None
+        for client_idx, embedding_grad in enumerate(client_embedding_gradients):
+            weighted_grad = embedding_grad * normalized_weights[client_idx]
+            if aggregated_embedding_grad is None:
+                aggregated_embedding_grad = weighted_grad
+            else:
+                aggregated_embedding_grad += weighted_grad
+
+        # === 步驟 2: Server 重新前向傳播 ===
+        self.global_weather_model.train()
+        self.global_optimizer.zero_grad()
+
+        # 計算 weather embeddings (保留計算圖)
+        weather_embeddings = self.global_weather_model.forward_embedding(weather_data)
+
+        # === 步驟 3: Chain Rule 反向傳播 ===
+        # 使用聚合的 embedding 梯度作為 backward 的 gradient 參數
+        weather_embeddings.backward(gradient=aggregated_embedding_grad)
+
+        # === 步驟 4: 更新 Weather Model ===
+        self.global_optimizer.step()
 
         # 記錄更新
         self.history['weather_update_rounds'].append(self.current_round)
 
-    def get_global_weather_model(self) -> TransformerModel:
+    def compute_weather_embeddings(
+        self,
+        weather_data: torch.Tensor,
+        requires_grad: bool = False
+    ) -> torch.Tensor:
         """
-        獲取當前全局 Weather Model (分發給客戶端)
+        計算 Weather 嵌入向量 (前向傳播)
+
+        Args:
+            weather_data: Weather 輸入數據 (num_samples, seq_len, feature_dim)
+            requires_grad: 是否需要梯度 (訓練時為 True)
 
         Returns:
-            global_weather_model: 全局 Weather Model 的深拷貝
+            weather_embeddings: Weather 嵌入向量 (num_samples, d_model)
 
         Note:
-            - 返回深拷貝避免客戶端直接修改全局模型
-            - 客戶端使用此模型進行本地訓練
+            - Weather Model 只存在於 Server 端
+            - Client 只接收嵌入向量，不接觸原始 Weather Model
         """
-        return deepcopy(self.global_weather_model)
+        if requires_grad:
+            self.global_weather_model.train()
+            embeddings = self.global_weather_model.forward_embedding(weather_data)
+        else:
+            self.global_weather_model.eval()
+            with torch.no_grad():
+                embeddings = self.global_weather_model.forward_embedding(weather_data)
+
+        return embeddings
 
     def evaluate_global(
         self,
