@@ -251,7 +251,10 @@ def train(args):
     # === 步驟 3: 載入客戶端數據 ===
     # 獲取客戶端 CSV 文件
     csv_pattern = os.path.join(config.data_path, config.hfl_csv_pattern + ".csv")
-    client_csv_files = sorted(glob.glob(csv_pattern))[:config.num_users]
+    all_files = sorted(glob.glob(csv_pattern))
+
+    # 過濾出真正的 CSV 檔案 (排除 .pkl.csv 等)
+    client_csv_files = [f for f in all_files if f.endswith('.csv') and not '.pkl' in f][:config.num_users]
 
     if not client_csv_files:
         raise FileNotFoundError(f"未找到客戶端數據: {csv_pattern}")

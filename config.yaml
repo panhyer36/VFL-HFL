@@ -55,7 +55,7 @@ fusion_model:
 data:
   data_path: "data"
   weather_csv: "Weather"              # Weather 數據文件名 (不含.csv)
-  hfl_csv_pattern: "processed/{Consumer_*,Public_Building}"  # HFL 客戶端數據模式 (包含所有Consumer和Public_Building)
+  hfl_csv_pattern: "processed/*"  # HFL 客戶端數據模式 (匹配所有 Consumer 和 Public_Building CSV 檔案)
   input_length: 96                    # 輸入序列長度
   output_length: 1                    # 輸出序列長度
 
