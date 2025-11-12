@@ -94,18 +94,18 @@ def load_weather_data(config):
         # 載入已有的標準化器
         with open(weather_scaler_path, 'rb') as f:
             weather_scaler = pickle.load(f)
-        print(f"  ✓ Weather scaler loaded")
+        print(f"  V Weather scaler loaded")
     else:
         # 創建新的標準化器
         weather_scaler = StandardScaler()
         weather_scaler.fit(weather_data_raw)
         with open(weather_scaler_path, 'wb') as f:
             pickle.dump(weather_scaler, f)
-        print(f"  ✓ Weather scaler created and saved")
+        print(f"  V Weather scaler created and saved")
 
     # 標準化
     weather_data_scaled = weather_scaler.transform(weather_data_raw)
-    print(f"  ✓ Weather data normalized: {weather_data_scaled.shape}")
+    print(f"  V Weather data normalized: {weather_data_scaled.shape}")
 
     return weather_data_scaled, weather_scaler
 
@@ -241,7 +241,7 @@ def load_client_data(config, weather_sequences, client_csv_files):
             'train_size': len(train_dataset)
         }
 
-        print(f"  ✓ Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+        print(f"  V Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
     print(f"\nTotal loaded {len(client_dataloaders)} clients")
     return client_dataloaders, client_names, target_scaler
@@ -318,7 +318,7 @@ def train(args):
 
             # 檢查 HFL 全局模型是否存在
             if os.path.exists(config.hfl_model_path):
-                print(f"  ✓ Found HFL global model: {config.hfl_model_path}")
+                print(f"  V Found HFL global model: {config.hfl_model_path}")
 
                 # 創建 HFL 模型架構
                 global_hfl_model = TransformerModel(
@@ -333,7 +333,7 @@ def train(args):
 
                 # 載入全局模型權重
                 global_hfl_model.load_state_dict(torch.load(config.hfl_model_path, map_location=device))
-                print(f"  ✓ Successfully loaded HFL global model weights")
+                print(f"  V Successfully loaded HFL global model weights")
 
                 # 為每個客戶端進行個性化適應
                 print(f"\n  Starting personalization adaptation for each client...")
@@ -377,7 +377,7 @@ def train(args):
                         print(f"    -> Using global model weights")
                         client_hfl_models[client_name] = global_hfl_model.state_dict()
 
-                print(f"\n  ✓ Completed personalization adaptation for {len(client_hfl_models)} clients")
+                print(f"\n  V Completed personalization adaptation for {len(client_hfl_models)} clients")
             else:
                 print(f"  ⚠ HFL global model file not found: {config.hfl_model_path}")
                 print(f"  -> Will use randomly initialized HFL model")
@@ -478,7 +478,7 @@ def train(args):
                 'val': val_embeddings
             }
 
-            print(f"    ✓ {client_name}: Train Embeddings {train_embeddings.shape}, Val Embeddings {val_embeddings.shape}")
+            print(f"    V {client_name}: Train Embeddings {train_embeddings.shape}, Val Embeddings {val_embeddings.shape}")
 
         # === 客戶端本地訓練 (使用 Server 發送的嵌入) ===
         client_losses = []
@@ -527,7 +527,7 @@ def train(args):
                 client_embedding_gradients,
                 client_sample_counts
             )
-            print(f"    ✓ Global Weather Model updated (Chain Rule)")
+            print(f"    V Global Weather Model updated (Chain Rule)")
             print(f"    - Participating clients: {len(client_embedding_gradients)}")
 
         # 全局評估
