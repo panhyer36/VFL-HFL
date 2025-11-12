@@ -116,8 +116,8 @@ logging:
 personalization:
   use_personalized_hfl: true           # 是否使用個性化的 HFL 模型
   hfl_model_path: "HFL_global_model.pth"  # HFL 全局模型路徑
-  personalization_steps: 10            # 個性化適應步數
-  adaptation_lr: 0.01                  # 個性化適應學習率
+  personalization_steps: 3            # 個性化適應步數
+  adaptation_lr: 0.001                  # 個性化適應學習率
 
 # 可視化配置
 visualization:
