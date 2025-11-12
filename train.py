@@ -512,7 +512,7 @@ def train(args):
                 client_embedding_gradients.append(embedding_grad)
                 client_sample_counts.append(num_samples)
 
-            print(f"    ✓ {client_name}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
+            print(f"    V {client_name}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
 
         # === Server 聚合 Embedding 梯度並更新 Weather Model ===
         if train_weather and client_embedding_gradients:
@@ -564,7 +564,7 @@ def train(args):
             f"{client_name}_fusion_model.pth"
         )
         client.save_fusion_model(fusion_path)
-        print(f"  ✓ {client_name} Fusion Model saved")
+        print(f"  V {client_name} Fusion Model saved")
 
     # === 步驟 8: 訓練摘要 ===
     summary = server.get_training_summary()

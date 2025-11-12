@@ -72,7 +72,7 @@ class VFLClient:
         # 載入 Per-FedAvg 個性化權重
         if hfl_model_state_dict is not None:
             self.hfl_model.load_state_dict(hfl_model_state_dict)
-            print(f"  ✓ Loaded Per-FedAvg personalized HFL model")
+            print(f"  V Loaded Per-FedAvg personalized HFL model")
         else:
             print(f"  ⚠ Using randomly initialized HFL model")
 
@@ -81,7 +81,7 @@ class VFLClient:
             for param in self.hfl_model.parameters():
                 param.requires_grad = False
             self.hfl_model.eval()
-            print(f"  ✓ HFL Model frozen")
+            print(f"  V HFL Model frozen")
 
         hfl_params = sum(p.numel() for p in self.hfl_model.parameters())
         print(f"\nHFL Model (Local, Frozen):")

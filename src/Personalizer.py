@@ -61,7 +61,7 @@ def load_global_model(config, model_path: str) -> TransformerModel:
         raise FileNotFoundError(f"Global model file not found: {model_path}")
 
     model.load_state_dict(torch.load(model_path, map_location=config.device))
-    print(f"✓ Successfully loaded global model: {model_path}")
+    print(f"V Successfully loaded global model: {model_path}")
 
     return model
 
@@ -109,7 +109,7 @@ def load_client_datasets(config) -> Tuple[List[SequenceCSVDataset], List[str]]:
             if len(dataset) > 0:
                 datasets.append(dataset)
                 client_names.append(csv_name)
-                print(f"  ✓ {csv_name}: {len(dataset)} samples")
+                print(f"  V {csv_name}: {len(dataset)} samples")
         except Exception as e:
             print(f"  ✗ {csv_name}: Failed to load - {e}")
 
@@ -322,7 +322,7 @@ def save_personalized_models(
     for client_name, state_dict in client_models.items():
         save_path = os.path.join(save_dir, f"{client_name}_personalized.pth")
         torch.save(state_dict, save_path)
-        print(f"  ✓ {client_name} -> {save_path}")
+        print(f"  V {client_name} -> {save_path}")
 
     print(f"Successfully saved {len(client_models)} models")
 
@@ -361,7 +361,7 @@ if __name__ == "__main__":
     # 保存模型
     save_personalized_models(client_models, args.save_dir)
 
-    print("\n✓ Personalized model initialization completed!")
+    print("\nV Personalized model initialization completed!")
     print("\nUsage:")
     print("```python")
     print("from Model import TransformerModel")

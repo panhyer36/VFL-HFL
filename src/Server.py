@@ -82,7 +82,7 @@ class VFLServer:
                         if pretrained_dict:
                             model_dict.update(pretrained_dict)
                             self.global_weather_model.load_state_dict(model_dict)
-                            print(f"  ✓ Successfully loaded {len(pretrained_dict)}/{len(ssl_state_dict)} weight layers")
+                            print(f"  V Successfully loaded {len(pretrained_dict)}/{len(ssl_state_dict)} weight layers")
                         else:
                             print(f"  ⚠ No matching weight layers, using random initialization")
                     except Exception as e:
