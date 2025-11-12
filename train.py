@@ -29,6 +29,8 @@ import pandas as pd
 import pickle
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import TensorDataset, DataLoader
+from dotenv import load_dotenv
+import requests
 
 # 導入自定義模組
 from config import load_config
@@ -36,6 +38,29 @@ from Server import VFLServer
 from Client import VFLClient
 from Personalizer import initialize_personalized_models
 
+# 載入環境變數
+load_dotenv()
+
+
+def send_message(message):
+    """
+    發送消息到 Webhook
+
+    Args:
+        message: 要發送的消息內容
+    """
+    if os.getenv('HOST_LINK') is None:
+        return
+    url = os.getenv('HOST_LINK')
+    name = os.getenv('NAME')
+    payload = {
+        "name": name,
+        "message": message
+    }
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Error sending message: {e}")
 
 def load_weather_data(config):
     """
@@ -385,6 +410,7 @@ def train(args):
     # === 步驟 6: 聯邦學習訓練循環 ===
     print(f"\n{'=' * 70}")
     print("開始聯邦學習訓練...")
+    send_message("開始聯邦學習訓練...")
     print(f"{'=' * 70}")
 
     for round_idx in range(config.K):
@@ -545,6 +571,7 @@ def train(args):
 
     print(f"\n{'=' * 70}")
     print("訓練完成！")
+    send_message("訓練完成！")
     print(f"{'=' * 70}")
     print(f"\n訓練摘要:")
     print(f"  - 總輪數: {summary['total_rounds']}")
