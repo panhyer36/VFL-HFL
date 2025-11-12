@@ -23,7 +23,7 @@ VFL Server 端模組 - 垂直聯邦學習協調器 (Split Learning 架構)
 import torch
 import random
 from typing import List, Dict
-from Model import TransformerModel
+from src.Model import TransformerModel
 
 
 class VFLServer:

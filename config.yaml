@@ -30,7 +30,7 @@ weather_model:
   max_seq_length: 100      # 最大序列長度
   dropout: 0.1             # Dropout率
   use_ssl_pretrain: true   # 是否使用 SSL 預訓練權重
-  ssl_pretrain_path: "ssl_pretrain.pt"  # SSL 預訓練權重路徑
+  ssl_pretrain_path: "pretrain_model/ssl_pretrain.pt"  # SSL 預訓練權重路徑
 
 # 模型配置 - HFL Model (本地客戶端)
 hfl_model:
@@ -115,7 +115,7 @@ logging:
 # Per-FedAvg 個性化配置 (用於初始化 HFL 模型)
 personalization:
   use_personalized_hfl: true           # 是否使用個性化的 HFL 模型
-  hfl_model_path: "HFL_global_model.pth"  # HFL 全局模型路徑
+  hfl_model_path: "pretrain_model/HFL_global_model.pth"  # HFL 全局模型路徑
   personalization_steps: 3            # 個性化適應步數
   adaptation_lr: 0.001                  # 個性化適應學習率
 

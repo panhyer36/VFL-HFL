@@ -34,9 +34,9 @@ import requests
 
 # 導入自定義模組
 from config import load_config
-from Server import VFLServer
-from Client import VFLClient
-from Personalizer import initialize_personalized_models
+from src.Server import VFLServer
+from src.Client import VFLClient
+from src.Personalizer import initialize_personalized_models
 
 # 載入環境變數
 load_dotenv()
@@ -146,7 +146,7 @@ def load_client_data(config, weather_sequences, client_csv_files):
     print("載入客戶端數據 (本地)")
     print(f"{'=' * 70}")
 
-    from DataLoader import SequenceCSVDataset
+    from src.DataLoader import SequenceCSVDataset
 
     client_dataloaders = {}
     client_names = []
@@ -313,8 +313,8 @@ def train(args):
         print(f"{'=' * 70}")
         try:
             import torch
-            from Model import TransformerModel
-            from DataLoader import SequenceCSVDataset
+            from src.Model import TransformerModel
+            from src.DataLoader import SequenceCSVDataset
 
             # 檢查 HFL 全局模型是否存在
             if os.path.exists(config.hfl_model_path):
@@ -361,7 +361,7 @@ def train(args):
                         )
 
                         # 使用 Personalizer 進行個性化適應
-                        from Personalizer import personalize_model_for_client
+                        from src.Personalizer import personalize_model_for_client
                         personalized_state = personalize_model_for_client(
                             global_model=global_hfl_model,
                             dataset=client_dataset,

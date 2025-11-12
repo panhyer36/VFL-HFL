@@ -27,7 +27,7 @@ import torch.nn as nn
 import numpy as np
 from typing import Tuple, Dict
 from torch.utils.data import DataLoader
-from Model import TransformerModel, FusionModel
+from src.Model import TransformerModel, FusionModel
 
 
 class VFLClient:

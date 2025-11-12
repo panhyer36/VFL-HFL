@@ -27,9 +27,9 @@ import torch
 from copy import deepcopy
 from typing import Dict, List, Tuple
 from config import load_config
-from Model import TransformerModel
-from DataLoader import SequenceCSVDataset
-from Trainer import FederatedTrainer
+from src.Model import TransformerModel
+from src.DataLoader import SequenceCSVDataset
+from src.Trainer import FederatedTrainer
 
 
 def load_global_model(config, model_path: str) -> TransformerModel:
