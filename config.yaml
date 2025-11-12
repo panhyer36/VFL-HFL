@@ -18,7 +18,7 @@ federated_learning:
 local_training:
   local_epochs: 1          # 本地訓練輪數 (VFL每輪通常是1個epoch)
   learning_rate: 0.001     # 學習率
-  batch_size: 16           # 批次大小 (降低以節省記憶體)
+  batch_size: 32           # 批次大小 (降低以節省記憶體)
 
 # 模型配置 - Weather Model (雲端)
 weather_model:
@@ -38,7 +38,7 @@ hfl_model:
   d_model: 256             # Transformer模型維度
   nhead: 8                 # 注意力頭數
   num_layers: 4            # Transformer層數
-  output_dim: null         # VFL不需要輸出層
+  output_dim: 1            # 輸出維度 (個性化適應時需要,VFL訓練時使用forward_embedding跳過)
   max_seq_length: 100      # 最大序列長度
   dropout: 0.1             # Dropout率
   freeze: true             # 是否凍結 HFL 模型 (使用 Per-FedAvg 個性化權重)
