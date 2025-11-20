@@ -236,6 +236,26 @@ class VFLServer:
         # 執行優化步驟
         self.global_optimizer.step()
         self.global_optimizer.zero_grad()
+        self.history['weather_update_rounds'].append(self.current_round)
+
+    def zero_weather_model_grad(self):
+        """清空全局 Weather Model 的梯度"""
+        self.global_optimizer.zero_grad()
+
+    def capture_weather_model_grads(self) -> List[torch.Tensor]:
+        """
+        擷取目前 Weather Model 參數的梯度
+
+        Returns:
+            grads: list of gradients，對應每個參數
+        """
+        grads = []
+        for param in self.global_weather_model.parameters():
+            if param.grad is None:
+                grads.append(torch.zeros_like(param))
+            else:
+                grads.append(param.grad.detach().clone())
+        return grads
 
     def update_weather_model_from_embeddings(
         self,

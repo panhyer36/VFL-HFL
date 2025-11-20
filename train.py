@@ -426,109 +426,107 @@ def train(args):
         if train_weather:
             print(f"  Training mode: Fusion Model + Weather Model ⚡")
         else:
-            print(f"  Training mode: Fusion Model only (Save communication) 📡")
+            print(f"  Training mode: Fusion Model only (Save communication) ")
 
         # 客戶端選擇
         selected_clients = server.select_clients(client_names)
         print(f"\n  Selected clients: {selected_clients}")
 
-        # === Split Learning 前向傳播: Server 計算 Weather 嵌入 ===
-        print(f"\n  Server computing Weather embeddings:")
-
-        # 收集所有選中客戶端的 Weather 數據
-        client_weather_data = {}
-        for client_name in selected_clients:
-            train_loader = client_dataloaders[client_name]['train']
-            val_loader = client_dataloaders[client_name]['val']
-
-            # 提取 Weather 數據 (訓練集)
-            train_weather_batches = []
-            for weather_batch, _, _ in train_loader:
-                train_weather_batches.append(weather_batch)
-            train_weather_data = torch.cat(train_weather_batches, dim=0).to(device)
-
-            # 提取 Weather 數據 (驗證集)
-            val_weather_batches = []
-            for weather_batch, _, _ in val_loader:
-                val_weather_batches.append(weather_batch)
-            val_weather_data = torch.cat(val_weather_batches, dim=0).to(device)
-
-            client_weather_data[client_name] = {
-                'train': train_weather_data,
-                'val': val_weather_data
-            }
-
-        # Server 計算嵌入向量
-        client_weather_embeddings = {}
-        for client_name in selected_clients:
-            # 訓練集嵌入 (需要梯度)
-            train_embeddings = server.compute_weather_embeddings(
-                client_weather_data[client_name]['train'],
-                requires_grad=train_weather
-            )
-
-            # 驗證集嵌入 (不需要梯度)
-            val_embeddings = server.compute_weather_embeddings(
-                client_weather_data[client_name]['val'],
-                requires_grad=False
-            )
-
-            client_weather_embeddings[client_name] = {
-                'train': train_embeddings,
-                'val': val_embeddings
-            }
-
-            print(f"    V {client_name}: Train Embeddings {train_embeddings.shape}, Val Embeddings {val_embeddings.shape}")
-
-        # === 客戶端本地訓練 (使用 Server 發送的嵌入) ===
+        # === Split Learning 訓練 (Batch-wise with FedAvg Aggregation) ===
+        print(f"\n  Distributed Training (Split Learning) with FedAvg aggregation:")
+        
+        if train_weather:
+            server.zero_weather_model_grad()
+        
         client_losses = []
         client_val_losses = []
-        client_embedding_gradients = []
+        client_grad_lists = []
         client_sample_counts = []
-
-        print(f"\n  Local training (Client side):")
+        
+        # 逐個客戶端進行訓練 (Batch-wise)
         for client_name in selected_clients:
             client = clients[client_name]
             train_loader = client_dataloaders[client_name]['train']
             val_loader = client_dataloaders[client_name]['val']
-
-            # 本地訓練 (接收 Server 的嵌入)
-            train_loss, embedding_grad, num_samples = client.local_train(
-                train_loader,
-                weather_embeddings=client_weather_embeddings[client_name]['train'],
-                train_weather=train_weather
-            )
-
-            # 本地驗證
-            val_loss = client.local_evaluate(
-                val_loader,
-                weather_embeddings=client_weather_embeddings[client_name]['val']
-            )
-
-            client_losses.append(train_loss)
-            client_val_losses.append(val_loss)
-
-            if train_weather and len(embedding_grad) > 0:
-                client_embedding_gradients.append(embedding_grad)
-                client_sample_counts.append(num_samples)
-
-            print(f"    V {client_name}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
-
-        # === Server 聚合 Embedding 梯度並更新 Weather Model ===
-        if train_weather and client_embedding_gradients:
-            print(f"\n  Server aggregating Embedding gradients and updating Weather Model (Split Learning + FedAvg):")
-
-            # 使用第一個客戶端的 Weather 數據進行反向傳播 (所有客戶端共享相同的 Weather 數據)
-            representative_client = selected_clients[0]
-            weather_data_for_backward = client_weather_data[representative_client]['train']
-
-            server.update_weather_model_from_embeddings(
-                weather_data_for_backward,
-                client_embedding_gradients,
+            
+            # --- 訓練階段 ---
+            client_total_loss = 0
+            client_num_batches = 0
+            
+            # 遍歷每個 Batch
+            for batch_idx, (weather_batch, hfl_batch, targets) in enumerate(train_loader):
+                weather_batch = weather_batch.to(device)
+                
+                # 1. Server 計算 Weather 嵌入 (Batch-wise)
+                # 如果是訓練 Weather Model，需要開啟梯度
+                requires_grad = train_weather
+                
+                # 注意: 這裡不需要 .detach()，因為我們希望梯度傳回 Server Model
+                weather_embedding = server.compute_weather_embeddings(
+                    weather_batch, 
+                    requires_grad=requires_grad
+                )
+                
+                # 2. Client 執行訓練步
+                loss, weather_grad = client.train_batch(
+                    weather_embedding, 
+                    hfl_batch, 
+                    targets, 
+                    train_weather=train_weather
+                )
+                
+                # 3. Server 反向傳播 (累積梯度)
+                if train_weather and weather_grad is not None:
+                    # 反向傳播累積梯度到 Server Model 參數
+                    weather_embedding.backward(weather_grad)
+                    
+                client_total_loss += loss
+                client_num_batches += 1
+                
+                # 釋放記憶體
+                del weather_embedding, weather_grad, loss
+            
+            # 計算該客戶端的平均 Loss
+            avg_loss = client_total_loss / client_num_batches if client_num_batches > 0 else 0
+            client_losses.append(avg_loss)
+            print(f"    V {client_name}: Train Loss = {avg_loss:.6f}")
+            
+            if train_weather:
+                client_grad_lists.append(server.capture_weather_model_grads())
+                client_sample_counts.append(len(train_loader.dataset))
+                server.zero_weather_model_grad()
+            
+            # --- 驗證階段 ---
+            client_val_loss = 0
+            val_batches = 0
+            
+            for weather_batch, hfl_batch, targets in val_loader:
+                 weather_batch = weather_batch.to(device)
+                 
+                 # Eval mode, no grad
+                 weather_embedding = server.compute_weather_embeddings(
+                     weather_batch, 
+                     requires_grad=False
+                 )
+                 
+                 l = client.evaluate_batch(weather_embedding, hfl_batch, targets)
+                 client_val_loss += l
+                 val_batches += 1
+                 
+                 del weather_embedding
+            
+            avg_val_loss = client_val_loss / val_batches if val_batches > 0 else 0
+            client_val_losses.append(avg_val_loss)
+            print(f"      {client_name}: Val Loss = {avg_val_loss:.6f}")
+            
+        # === Server FedAvg 聚合並更新 Weather Model ===
+        if train_weather and client_grad_lists:
+            aggregated_grads = server.aggregate_weather_gradients(
+                client_grad_lists,
                 client_sample_counts
             )
-            print(f"    V Global Weather Model updated (Chain Rule)")
-            print(f"    - Participating clients: {len(client_embedding_gradients)}")
+            server.apply_aggregated_gradients(aggregated_grads)
+            print(f"    V Global Weather Model updated (FedAvg)")
 
         # 全局評估
         avg_train_loss = sum(client_losses) / len(client_losses)

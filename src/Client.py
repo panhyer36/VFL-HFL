@@ -110,8 +110,83 @@ class VFLClient:
             weight_decay=1e-4
         )
 
-        print(f"\nDevice: {device}")
+        print(f"Device: {device}")
         print(f"{'=' * 70}")
+
+    def train_batch(
+        self,
+        weather_embedding: torch.Tensor,
+        hfl_batch: torch.Tensor,
+        targets: torch.Tensor,
+        train_weather: bool = True
+    ) -> Tuple[float, torch.Tensor]:
+        """
+        執行單個 Batch 的訓練步
+        
+        Args:
+            weather_embedding: Weather 嵌入 (batch_size, dim)
+            hfl_batch: HFL 數據 (batch_size, seq_len, dim)
+            targets: 目標值 (batch_size, 1)
+            train_weather: 是否需要計算 weather 梯度
+            
+        Returns:
+            loss: 損失值
+            weather_grad: weather_embedding 的梯度 (如果 train_weather=True)
+        """
+        self.fusion_model.train()
+        
+        # 確保數據在正確設備
+        hfl_batch = hfl_batch.to(self.device)
+        targets = targets.to(self.device)
+        
+        # 如果需要訓練 Weather Model，確保嵌入需要梯度
+        # 我們總是 detach 以截斷梯度流，並手動獲取對 embedding 的梯度
+        # 這樣可以在 Server 端進行梯度聚合和處理
+        if train_weather:
+             weather_embedding = weather_embedding.detach().requires_grad_(True)
+
+        # 前向傳播
+        # HFL 嵌入 (凍結)
+        with torch.no_grad():
+            hfl_embedding = self.hfl_model.forward_embedding(hfl_batch)
+
+        # Fusion 預測
+        predictions = self.fusion_model(weather_embedding, hfl_embedding)
+
+        # 計算損失
+        loss = self.criterion(predictions, targets)
+
+        # 反向傳播
+        self.fusion_optimizer.zero_grad()
+        loss.backward()
+
+        # 更新 Fusion Model
+        self.fusion_optimizer.step()
+
+        # 提取 Weather 嵌入的梯度
+        weather_grad = None
+        if train_weather and weather_embedding.grad is not None:
+            weather_grad = weather_embedding.grad.clone()
+            
+        return loss.item(), weather_grad
+
+    def evaluate_batch(
+        self,
+        weather_embedding: torch.Tensor,
+        hfl_batch: torch.Tensor,
+        targets: torch.Tensor
+    ) -> float:
+        """執行單個 Batch 的驗證"""
+        self.fusion_model.eval()
+        hfl_batch = hfl_batch.to(self.device)
+        targets = targets.to(self.device)
+        
+        with torch.no_grad():
+            hfl_embedding = self.hfl_model.forward_embedding(hfl_batch)
+            predictions = self.fusion_model(weather_embedding, hfl_embedding)
+            loss = self.criterion(predictions, targets)
+            
+        return loss.item()
 
     def local_train(
         self,
@@ -202,33 +277,42 @@ class VFLClient:
 
         return avg_loss, aggregated_embedding_grad, num_samples
 
-    def local_evaluate(self, val_loader: DataLoader, weather_embeddings: torch.Tensor) -> float:
+    def local_evaluate(
+        self,
+        val_loader: DataLoader,
+        weather_embeddings: torch.Tensor,
+        return_outputs: bool = False
+    ):
         """
         本地驗證
 
         Args:
             val_loader: 驗證數據加載器
             weather_embeddings: Server 發送的 Weather 嵌入向量
+            return_outputs: 是否回傳預測與目標（用於測試階段）
 
         Returns:
             avg_val_loss: 平均驗證損失
+            (predictions, targets): 當 return_outputs=True 時額外回傳
         """
         self.fusion_model.eval()
 
         val_loss = 0.0
         num_batches = 0
+        ptr = 0
+        all_predictions = []
+        all_targets = []
 
         with torch.no_grad():
-            batch_idx = 0
             for _, hfl_batch, targets in val_loader:
                 hfl_batch = hfl_batch.to(self.device)
                 targets = targets.to(self.device)
 
                 # 提取當前 batch 的 Weather 嵌入
                 batch_size = hfl_batch.size(0)
-                start_idx = batch_idx * batch_size
-                end_idx = start_idx + batch_size
-                weather_embedding_batch = weather_embeddings[start_idx:end_idx]
+                end_idx = ptr + batch_size
+                weather_embedding_batch = weather_embeddings[ptr:end_idx].to(self.device)
+                ptr = end_idx
 
                 # 前向傳播
                 hfl_embedding = self.hfl_model.forward_embedding(hfl_batch)
@@ -238,9 +322,15 @@ class VFLClient:
                 loss = self.criterion(predictions, targets)
                 val_loss += loss.item()
                 num_batches += 1
-                batch_idx += 1
+                if return_outputs:
+                    all_predictions.append(predictions.detach().cpu())
+                    all_targets.append(targets.detach().cpu())
 
         avg_val_loss = val_loss / num_batches if num_batches > 0 else 0.0
+        if return_outputs:
+            preds = torch.cat(all_predictions, dim=0) if all_predictions else torch.empty(0, 1)
+            trgs = torch.cat(all_targets, dim=0) if all_targets else torch.empty(0, 1)
+            return avg_val_loss, preds, trgs
         return avg_val_loss
 
     def local_test(
