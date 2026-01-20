@@ -57,7 +57,10 @@ def load_scaler(path: str, name: str):
 
 def create_sequences(weather, hfl, targets, seq_len):
     X_w, X_h, y = [], [], []
-    limit = len(weather) - seq_len
+    # 修正：weather 已經是 sequences，不需要再減 seq_len
+    # limit 應基於 hfl/targets 的長度，與 PerFedAvg 對齊
+    # PerFedAvg: total_sequences = len(data) - (input_len + output_len) + 1 = len(data) - 96
+    limit = min(len(weather), len(hfl) - seq_len, len(targets) - seq_len)
     if limit <= 0:
         return np.array([]), np.array([]), np.array([])
     for i in range(limit):
@@ -129,14 +132,15 @@ def prepare_client_test_loader(
     hfl_scaled = hfl_scaler.transform(hfl_data)
     target_scaled = target_scaler.transform(target_data.reshape(-1, 1)).flatten()
 
-    min_len = min(len(weather_sequences), len(hfl_scaled), len(target_scaled))
-    if min_len <= config.input_length:
+    # 不截斷 hfl/target，讓 create_sequences 內部的 limit 正確計算
+    # limit = min(len(weather_sequences), len(hfl)-96, len(target)-96) 與 PerFedAvg 對齊
+    if len(hfl_scaled) <= config.input_length:
         return None, 0
 
     X_w, X_h, y = create_sequences(
-        weather_sequences[:min_len],
-        hfl_scaled[:min_len],
-        target_scaled[:min_len],
+        weather_sequences,
+        hfl_scaled,
+        target_scaled,
         config.input_length,
     )
     total = len(X_w)

@@ -194,22 +194,23 @@ def load_client_data(config, weather_sequences, client_csv_files):
         client_hfl_scaled = hfl_scaler.transform(client_hfl_data)
         client_target_scaled = target_scaler.transform(client_target_data.reshape(-1, 1)).flatten()
 
-        # 對齊長度
-        min_len = min(len(weather_sequences), len(client_hfl_scaled), len(client_target_scaled))
-
-        # 創建序列
+        # 創建序列（與 PerFedAvg DataLoader 對齊）
         def create_sequences(weather, hfl, targets, seq_len):
             X_w, X_h, y = [], [], []
-            for i in range(len(weather) - seq_len):
+            # 修正：weather 已經是 sequences，不需要再減 seq_len
+            # limit 應基於 hfl/targets 的長度，與 PerFedAvg 對齊
+            limit = min(len(weather), len(hfl) - seq_len, len(targets) - seq_len)
+            for i in range(limit):
                 X_w.append(weather[i])
                 X_h.append(hfl[i:i + seq_len])
                 y.append(targets[i + seq_len])
             return np.array(X_w), np.array(X_h), np.array(y)
 
+        # 不截斷 hfl/target，讓 create_sequences 內部的 limit 正確計算
         X_w, X_h, y = create_sequences(
-            weather_sequences[:min_len],
-            client_hfl_scaled[:min_len],
-            client_target_scaled[:min_len],
+            weather_sequences,
+            client_hfl_scaled,
+            client_target_scaled,
             seq_length
         )
 
