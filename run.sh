@@ -16,7 +16,7 @@ echo "日誌文件: ${LOG_FILE}"
 echo "=========================================="
 
 # 後台運行訓練腳本
-nohup python train.py > "${LOG_FILE}" 2>&1 &
+nohup python3 train.py > "${LOG_FILE}" 2>&1 &
 
 # 獲取進程ID
 PID=$!

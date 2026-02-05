@@ -46,10 +46,11 @@ def load_config(config_path="config.yaml"):
     config.num_users = fl_config['num_clients']
     config.eval_interval = fl_config['eval_interval']
 
-    # VFL 訓練策略配置
+    # VFL 三階段訓練策略配置
     training_strategy = fl_config['training_strategy']
-    config.phase1_rounds = training_strategy['phase1_rounds']
-    config.phase2_rounds = training_strategy['phase2_rounds']
+    config.phase0_rounds = training_strategy.get('phase0_rounds', 5)  # Phase 0: Fusion 預熱期 (預設 5 輪)
+    config.phase1_rounds = training_strategy['phase1_rounds']          # Phase 1: 聯合訓練期
+    config.phase2_rounds = training_strategy['phase2_rounds']          # Phase 2: 通訊優化期
     config.phase2_fusion_freq = training_strategy['phase2_fusion_freq']
 
     # === 本地訓練配置 ===
@@ -180,5 +181,6 @@ if __name__ == "__main__":
     print(f"Number of clients: {config.num_users}")
     print(f"Weather features: {len(config.weather_features)}")
     print(f"HFL features: {len(config.hfl_features)}")
-    print(f"Phase 1 rounds: {config.phase1_rounds}")
-    print(f"Phase 2 rounds: {config.phase2_rounds}")
+    print(f"Phase 0 rounds (Fusion warmup): {config.phase0_rounds}")
+    print(f"Phase 1 rounds (Joint training): {config.phase1_rounds}")
+    print(f"Phase 2 rounds (Comm optimized): {config.phase2_rounds}")

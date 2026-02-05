@@ -124,36 +124,54 @@ class VFLServer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
 
-        print(f"\nTraining Strategy:")
+        print(f"\nThree-Phase Training Strategy:")
         print(f"  - Total rounds: {config.K}")
-        print(f"  - Phase 1 ({config.phase1_rounds} rounds): Train Fusion + Weather every round")
-        print(f"  - Phase 2 ({config.phase2_rounds} rounds): {config.phase2_fusion_freq} rounds Fusion, 1 round Weather")
-        print(f"  - Communication saving: {self._estimate_comm_saving():.1f}%")
+        print(f"  - Phase 0 ({config.phase0_rounds} rounds): Fusion warmup - Weather frozen")
+        print(f"  - Phase 1 ({config.phase1_rounds} rounds): Joint training - Fusion + Weather every round")
+        print(f"  - Phase 2 ({config.phase2_rounds} rounds): Comm optimized - {config.phase2_fusion_freq} rounds Fusion, 1 round Weather")
+        print(f"  - Estimated communication saving: {self._estimate_comm_saving():.1f}%")
         print("=" * 70)
 
     def _estimate_comm_saving(self):
-        """估計通訊節省比例"""
+        """
+        估計通訊節省比例
+
+        三階段策略通訊分析:
+        - Phase 0: 無 Weather Model 更新 (0 次通訊)
+        - Phase 1: 每輪更新 Weather Model (phase1_rounds 次通訊)
+        - Phase 2: 週期性更新 (phase2_rounds / (phase2_fusion_freq + 1) 次通訊)
+        """
+        phase0_updates = 0  # Phase 0 不更新 Weather Model
         phase1_updates = self.config.phase1_rounds
         phase2_updates = self.config.phase2_rounds // (self.config.phase2_fusion_freq + 1)
-        total_updates = phase1_updates + phase2_updates
+        total_updates = phase0_updates + phase1_updates + phase2_updates
         total_rounds = self.config.K
         saving = (1 - total_updates / total_rounds) * 100
         return saving
 
     def select_clients(self, client_names: List[str]) -> List[str]:
         """
-        選擇參與本輪訓練的客戶端 (FedAvg 策略)
+        選擇參與本輪訓練的客戶端
+
+        選擇策略 (根據訓練階段):
+        - Phase 0 (Fusion 預熱期): 選擇所有客戶端 (client_fraction = 1.0)
+          → 確保每個 Fusion Model 都能預熱，且此階段無通訊開銷
+        - Phase 1 & 2: 按比例隨機選擇 (client_fraction = config.r)
+          → 模擬聯邦學習場景，部分客戶端參與
 
         Args:
             client_names: 所有客戶端名稱列表
 
         Returns:
             selected_clients: 被選中的客戶端名稱列表
-
-        Note:
-            - VFL 場景通常需要所有客戶端參與 (client_fraction=1.0)
-            - 如果部分參與，使用隨機選擇
         """
+        phase0_rounds = self.config.phase0_rounds
+
+        # Phase 0: 所有客戶端參與 Fusion 預熱
+        if self.current_round < phase0_rounds:
+            return client_names.copy()
+
+        # Phase 1 & 2: 按比例隨機選擇
         num_selected = max(1, int(len(client_names) * self.config.r))
         selected = random.sample(client_names, num_selected)
         return selected
@@ -162,20 +180,69 @@ class VFLServer:
         """
         判斷當前輪次是否需要更新 Weather Model
 
-        分階段訓練策略:
-        - 階段1 (前 phase1_rounds 輪): 每輪都更新
-        - 階段2 (後續輪次): 每隔 phase2_fusion_freq 輪更新一次
+        三階段訓練策略:
+        - Phase 0 (前 phase0_rounds 輪): Fusion 預熱期，Weather Model 凍結 → return False
+        - Phase 1 (接下來 phase1_rounds 輪): 聯合訓練期，每輪都更新 → return True
+        - Phase 2 (剩餘輪次): 通訊優化期，週期性更新 → 條件判斷
 
         Returns:
             bool: True 表示需要更新 Weather Model
         """
-        if self.current_round < self.config.phase1_rounds:
-            # 階段1: 每輪都更新
+        phase0_rounds = self.config.phase0_rounds  # 預設 5
+        phase1_rounds = self.config.phase1_rounds  # 10
+
+        # Phase 0: Fusion Model 預熱期 (Weather 凍結)
+        if self.current_round < phase0_rounds:
+            return False
+
+        # Phase 1: 聯合訓練期 (每輪都更新)
+        adjusted_round = self.current_round - phase0_rounds
+        if adjusted_round < phase1_rounds:
             return True
+
+        # Phase 2: 通訊優化期 (週期性更新)
+        phase2_round = adjusted_round - phase1_rounds
+        return (phase2_round + 1) % (self.config.phase2_fusion_freq + 1) == 0
+
+    def get_current_phase_info(self) -> Dict:
+        """
+        獲取當前訓練階段的詳細資訊
+
+        Returns:
+            dict: 包含階段名稱、階段內輪次、總輪次等資訊
+        """
+        phase0_rounds = self.config.phase0_rounds
+        phase1_rounds = self.config.phase1_rounds
+        phase2_rounds = self.config.phase2_rounds
+
+        if self.current_round < phase0_rounds:
+            # Phase 0: Fusion 預熱期
+            return {
+                'phase': 0,
+                'phase_name': 'Fusion Warmup',
+                'phase_round': self.current_round + 1,
+                'phase_total': phase0_rounds,
+                'train_weather': False
+            }
+        elif self.current_round < phase0_rounds + phase1_rounds:
+            # Phase 1: 聯合訓練期
+            return {
+                'phase': 1,
+                'phase_name': 'Joint Training',
+                'phase_round': self.current_round - phase0_rounds + 1,
+                'phase_total': phase1_rounds,
+                'train_weather': True
+            }
         else:
-            # 階段2: 週期性更新
-            rounds_in_phase2 = self.current_round - self.config.phase1_rounds
-            return (rounds_in_phase2 % (self.config.phase2_fusion_freq + 1)) == self.config.phase2_fusion_freq
+            # Phase 2: 通訊優化期
+            phase2_round = self.current_round - phase0_rounds - phase1_rounds
+            return {
+                'phase': 2,
+                'phase_name': 'Communication Optimized',
+                'phase_round': phase2_round + 1,
+                'phase_total': phase2_rounds,
+                'train_weather': self.should_update_weather()
+            }
 
     def aggregate_weather_gradients(
         self,
@@ -400,7 +467,7 @@ class VFLServer:
 
     def get_training_summary(self) -> Dict:
         """
-        獲取訓練摘要統計
+        獲取訓練摘要統計 (含三階段策略分析)
 
         Returns:
             summary: 訓練摘要字典
@@ -408,13 +475,23 @@ class VFLServer:
         weather_updates = len(self.history['weather_update_rounds'])
         total_rounds = self.current_round + 1
 
+        # 三階段配置
+        phase0_rounds = self.config.phase0_rounds
+        phase1_rounds = self.config.phase1_rounds
+        phase2_rounds = self.config.phase2_rounds
+
         summary = {
             'total_rounds': total_rounds,
             'weather_updates': weather_updates,
-            'comm_saving_actual': (1 - weather_updates / total_rounds) * 100,
+            'comm_saving_actual': (1 - weather_updates / total_rounds) * 100 if total_rounds > 0 else 0,
             'best_val_loss': self.best_val_loss,
             'final_train_loss': self.history['train_loss'][-1] if self.history['train_loss'] else 0,
-            'final_val_loss': self.history['val_loss'][-1] if self.history['val_loss'] else 0
+            'final_val_loss': self.history['val_loss'][-1] if self.history['val_loss'] else 0,
+            # 三階段配置資訊
+            'phase0_rounds': phase0_rounds,
+            'phase1_rounds': phase1_rounds,
+            'phase2_rounds': phase2_rounds,
+            'training_strategy': f"Phase0({phase0_rounds}) + Phase1({phase1_rounds}) + Phase2({phase2_rounds})"
         }
 
         return summary

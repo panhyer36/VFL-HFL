@@ -15,9 +15,10 @@ VFL 訓練主腳本 - 垂直聯邦學習 + FedAvg
   * HFL 數據 → HFL Model → HFL 嵌入
   * 雙方嵌入 → Fusion Model → 預測
 
-**通訊優化**:
-- 階段1: 每輪都訓練 Fusion + Weather
-- 階段2: 4輪訓練 Fusion，1輪訓練 Weather (節省通訊)
+**三階段通訊優化**:
+- Phase 0: Fusion 預熱期 - 只訓練 Fusion Model，Weather Model 凍結
+- Phase 1: 聯合訓練期 - 每輪都訓練 Fusion + Weather
+- Phase 2: 通訊優化期 - 4輪訓練 Fusion，1輪訓練 Weather (節省通訊)
 """
 
 import argparse
@@ -417,21 +418,29 @@ def train(args):
     for round_idx in range(config.K):
         server.current_round = round_idx
 
+        # 獲取當前階段資訊
+        phase_info = server.get_current_phase_info()
+        train_weather = phase_info['train_weather']
+
         print(f"\n{'─' * 70}")
         print(f"Federated Learning Round [{round_idx + 1}/{config.K}]")
+        print(f"Phase {phase_info['phase']} - {phase_info['phase_name']} [{phase_info['phase_round']}/{phase_info['phase_total']}]")
         print(f"{'─' * 70}")
 
-        # 確定訓練策略
-        train_weather = server.should_update_weather()
-
-        if train_weather:
-            print(f"  Training mode: Fusion Model + Weather Model ⚡")
+        # 根據階段顯示訓練模式
+        if phase_info['phase'] == 0:
+            print(f"  Training mode: Fusion Model only (Weather frozen - warmup period)")
+        elif train_weather:
+            print(f"  Training mode: Fusion Model + Weather Model")
         else:
-            print(f"  Training mode: Fusion Model only (Save communication) ")
+            print(f"  Training mode: Fusion Model only (Save communication)")
 
         # 客戶端選擇
         selected_clients = server.select_clients(client_names)
-        print(f"\n  Selected clients: {selected_clients}")
+        if phase_info['phase'] == 0:
+            print(f"\n  Selected clients: All {len(selected_clients)} clients (Fusion warmup - full participation)")
+        else:
+            print(f"\n  Selected clients ({len(selected_clients)}/{len(client_names)}): {selected_clients}")
 
         # === Split Learning 訓練 (Batch-wise with FedAvg Aggregation) ===
         print(f"\n  Distributed Training (Split Learning) with FedAvg aggregation:")
@@ -574,6 +583,7 @@ def train(args):
     print(f"{'=' * 70}")
     print(f"\nTraining Summary:")
     print(f"  - Total rounds: {summary['total_rounds']}")
+    print(f"  - Training strategy: {summary['training_strategy']}")
     print(f"  - Weather Model updates: {summary['weather_updates']}")
     print(f"  - Actual communication saving: {summary['comm_saving_actual']:.1f}%")
     print(f"  - Best val loss: {summary['best_val_loss']:.6f}")
