@@ -158,7 +158,9 @@ class TransformerModel(nn.Module):
         # 投影到d_model維度
         x = self.input_proj(x)
         x = self.input_norm(x)
-        x = x * math.sqrt(self.d_model)  # 縮放因子
+        # 注意: 移除了 x * sqrt(d_model) 縮放。
+        # LayerNorm 後值已歸一化至單位方差，乘以 sqrt(d_model)=16 會使內容信號
+        # 遠大於位置編碼 (值域[-1,1])，壓制位置信息。移除後兩者在相似量級。
 
         # 添加位置編碼
         x = self.pos_encoder(x)
@@ -325,12 +327,19 @@ class FusionModel(nn.Module):
         self.init_weights()
 
     def init_weights(self):
-        """使用Xavier初始化權重"""
-        for m in self.modules():
+        """初始化權重: fusion_network 使用 Kaiming (適合 ReLU), 注意力層使用 Xavier"""
+        # Fusion network 使用 ReLU 激活，Kaiming 初始化更合適
+        for m in self.fusion_network.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+        # 注意力層使用 softmax，Xavier 初始化更合適
+        if self.use_attention:
+            nn.init.xavier_uniform_(self.attention_party_a.weight)
+            nn.init.xavier_uniform_(self.attention_party_b.weight)
+            nn.init.zeros_(self.attention_party_a.bias)
+            nn.init.zeros_(self.attention_party_b.bias)
 
     def forward(self, embedding_party_a, embedding_party_b):
         """

@@ -160,6 +160,12 @@ class VFLClient:
         self.fusion_optimizer.zero_grad()
         loss.backward()
 
+        # 梯度裁剪 (防止梯度爆炸，特別是 Split Learning 跨網路梯度傳遞場景)
+        if hasattr(self.config, 'gradient_clip_norm') and self.config.gradient_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.fusion_model.parameters(), self.config.gradient_clip_norm
+            )
+
         # 更新 Fusion Model
         self.fusion_optimizer.step()
 
@@ -205,6 +211,10 @@ class VFLClient:
         5. 更新 Fusion Model (總是更新)
         6. 提取 ∂L/∂embedding_weather (Chain Rule) 回傳 Server
 
+        WARNING: weather_embeddings 必須與 train_loader 的迭代順序對齊。
+        若 train_loader 設定 shuffle=True，嵌入將與 HFL/target 錯位！
+        主訓練迴圈 (train.py) 使用 batch-wise 的 train_batch() 方法，不受此限制。
+
         Args:
             train_loader: 訓練數據加載器
                 格式: (weather_batch, hfl_batch, targets)
@@ -222,18 +232,18 @@ class VFLClient:
         num_batches = 0
         embedding_gradients = []  # 儲存每個 batch 的 embedding 梯度
 
-        batch_idx = 0
+        ptr = 0
         for _, hfl_batch, targets in train_loader:
             hfl_batch = hfl_batch.to(self.device)
             targets = targets.to(self.device)
 
-            # === 提取當前 batch 的 Weather 嵌入 ===
+            # === 提取當前 batch 的 Weather 嵌入 (ptr-based 索引) ===
             batch_size = hfl_batch.size(0)
-            start_idx = batch_idx * batch_size
-            end_idx = start_idx + batch_size
+            end_idx = ptr + batch_size
 
             # 從完整的 weather_embeddings 中取出當前 batch
-            weather_embedding_batch = weather_embeddings[start_idx:end_idx]
+            weather_embedding_batch = weather_embeddings[ptr:end_idx].to(self.device)
+            ptr = end_idx
 
             # 如果需要訓練 Weather Model，確保嵌入需要梯度
             if train_weather:
@@ -254,6 +264,12 @@ class VFLClient:
             self.fusion_optimizer.zero_grad()
             loss.backward()
 
+            # 梯度裁剪
+            if hasattr(self.config, 'gradient_clip_norm') and self.config.gradient_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.fusion_model.parameters(), self.config.gradient_clip_norm
+                )
+
             # 更新 Fusion Model
             self.fusion_optimizer.step()
 
@@ -263,7 +279,6 @@ class VFLClient:
 
             epoch_loss += loss.item()
             num_batches += 1
-            batch_idx += 1
 
         # 聚合所有 batch 的 embedding 梯度
         if train_weather and embedding_gradients:
@@ -358,16 +373,16 @@ class VFLClient:
         all_targets = []
 
         with torch.no_grad():
-            batch_idx = 0
+            ptr = 0
             for _, hfl_batch, targets in test_loader:
                 hfl_batch = hfl_batch.to(self.device)
                 targets = targets.to(self.device)
 
-                # 提取當前 batch 的 Weather 嵌入
+                # 提取當前 batch 的 Weather 嵌入 (ptr-based 索引，與 local_evaluate 一致)
                 batch_size = hfl_batch.size(0)
-                start_idx = batch_idx * batch_size
-                end_idx = start_idx + batch_size
-                weather_embedding_batch = weather_embeddings[start_idx:end_idx]
+                end_idx = ptr + batch_size
+                weather_embedding_batch = weather_embeddings[ptr:end_idx].to(self.device)
+                ptr = end_idx
 
                 # 前向傳播
                 hfl_embedding = self.hfl_model.forward_embedding(hfl_batch)
@@ -377,7 +392,6 @@ class VFLClient:
                 loss = self.criterion(predictions, targets)
                 test_loss += loss.item()
                 num_batches += 1
-                batch_idx += 1
 
                 # 收集預測結果
                 all_predictions.extend(predictions.cpu().numpy())

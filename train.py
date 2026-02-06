@@ -97,12 +97,13 @@ def load_weather_data(config):
             weather_scaler = pickle.load(f)
         print(f"  V Weather scaler loaded")
     else:
-        # 創建新的標準化器
+        # 創建新的標準化器 (僅在訓練集上擬合，防止數據洩漏)
+        train_end = int(len(weather_data_raw) * config.train_ratio)
         weather_scaler = StandardScaler()
-        weather_scaler.fit(weather_data_raw)
+        weather_scaler.fit(weather_data_raw[:train_end])
         with open(weather_scaler_path, 'wb') as f:
             pickle.dump(weather_scaler, f)
-        print(f"  V Weather scaler created and saved")
+        print(f"  V Weather scaler created (fitted on training portion: {train_end}/{len(weather_data_raw)} rows)")
 
     # 標準化
     weather_data_scaled = weather_scaler.transform(weather_data_raw)
@@ -141,7 +142,7 @@ def load_client_data(config, weather_sequences, client_csv_files):
     Returns:
         client_dataloaders: 字典 {client_name: {'train': loader, 'val': loader, 'train_size': int}}
         client_names: 客戶端名稱列表
-        target_scaler: 目標變量標準化器
+        client_target_scalers: 字典 {client_name: target_scaler} 每個客戶端自己的目標標準化器
     """
     print(f"\n{'=' * 70}")
     print("Loading Client Data (Local)")
@@ -151,13 +152,14 @@ def load_client_data(config, weather_sequences, client_csv_files):
 
     client_dataloaders = {}
     client_names = []
-    target_scaler = None
-    hfl_scaler = None
+    client_target_scalers = {}
 
     # 序列參數
     seq_length = config.input_length
     output_length = config.output_length
     batch_size = config.batch_size
+
+    processed_dir = os.path.join(config.data_path, 'processed')
 
     for idx, csv_file in enumerate(client_csv_files):
         client_name = os.path.basename(csv_file).replace('.csv', '')
@@ -178,18 +180,16 @@ def load_client_data(config, weather_sequences, client_csv_files):
         client_hfl_data = client_df[config.hfl_features].values
         client_target_data = client_df[target_col].values
 
-        # 標準化器 (第一個客戶端創建，其餘共用)
-        if idx == 0:
-            hfl_scaler = StandardScaler()
-            hfl_scaler.fit(client_hfl_data)
-            target_scaler = StandardScaler()
-            target_scaler.fit(client_target_data.reshape(-1, 1))
+        # 載入前處理階段的 per-client scaler (與 PerFedAvg 訓練時一致)
+        hfl_scaler_path = os.path.join(processed_dir, f'{client_name}_feature_scaler.pkl')
+        target_scaler_path = os.path.join(processed_dir, f'{client_name}_target_scaler.pkl')
 
-            # 保存標準化器
-            with open(os.path.join(config.data_path, 'hfl_scaler.pkl'), 'wb') as f:
-                pickle.dump(hfl_scaler, f)
-            with open(os.path.join(config.data_path, 'target_scaler.pkl'), 'wb') as f:
-                pickle.dump(target_scaler, f)
+        with open(hfl_scaler_path, 'rb') as f:
+            hfl_scaler = pickle.load(f)
+        with open(target_scaler_path, 'rb') as f:
+            target_scaler = pickle.load(f)
+        client_target_scalers[client_name] = target_scaler
+        print(f"  V Loaded per-client scalers from {processed_dir}")
 
         # 標準化
         client_hfl_scaled = hfl_scaler.transform(client_hfl_data)
@@ -246,7 +246,7 @@ def load_client_data(config, weather_sequences, client_csv_files):
         print(f"  V Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
     print(f"\nTotal loaded {len(client_dataloaders)} clients")
-    return client_dataloaders, client_names, target_scaler
+    return client_dataloaders, client_names, client_target_scalers
 
 
 def train(args):
@@ -301,7 +301,7 @@ def train(args):
     print(f"\nWeather sequences created: {weather_sequences.shape}")
 
     # 載入所有客戶端數據
-    client_dataloaders, client_names, target_scaler = load_client_data(
+    client_dataloaders, client_names, client_target_scalers = load_client_data(
         config,
         weather_sequences,
         client_csv_files
@@ -413,7 +413,19 @@ def train(args):
         )
         clients[client_name] = client
 
-    # === 步驟 6: 聯邦學習訓練循環 ===
+    # === 步驟 6: 初始化學習率調度器 ===
+    fusion_schedulers = {}
+    for client_name in client_names:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            clients[client_name].fusion_optimizer, T_max=config.K
+        )
+        fusion_schedulers[client_name] = scheduler
+    server_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        server.global_optimizer, T_max=config.K
+    )
+    print(f"\n  V Learning rate schedulers initialized (CosineAnnealingLR, T_max={config.K})")
+
+    # === 步驟 7: 聯邦學習訓練循環 ===
     print(f"\n{'=' * 70}")
     print("Starting Federated Learning Training...")
     send_message("Starting Federated Learning Training...")
@@ -448,137 +460,148 @@ def train(args):
 
         # === Split Learning 訓練 (Batch-wise with FedAvg Aggregation) ===
         print(f"\n  Distributed Training (Split Learning) with FedAvg aggregation:")
-        
+
         if train_weather:
             server.zero_weather_model_grad()
-        
+
         client_losses = []
-        client_val_losses = []
         client_grad_lists = []
         client_sample_counts = []
-        
+
         # 逐個客戶端進行訓練 (Batch-wise)
         for client_name in selected_clients:
             client = clients[client_name]
             train_loader = client_dataloaders[client_name]['train']
-            val_loader = client_dataloaders[client_name]['val']
-            
+
             # --- 訓練階段 ---
             client_total_loss = 0
             client_num_batches = 0
-            
+
             # 遍歷每個 Batch
             for batch_idx, (weather_batch, hfl_batch, targets) in enumerate(train_loader):
                 weather_batch = weather_batch.to(device)
-                
+
                 # 1. Server 計算 Weather 嵌入 (Batch-wise)
-                # 如果是訓練 Weather Model，需要開啟梯度
-                requires_grad = train_weather
-                
-                # 注意: 這裡不需要 .detach()，因為我們希望梯度傳回 Server Model
                 weather_embedding = server.compute_weather_embeddings(
-                    weather_batch, 
-                    requires_grad=requires_grad
+                    weather_batch,
+                    requires_grad=train_weather
                 )
-                
+
                 # 2. Client 執行訓練步
                 loss, weather_grad = client.train_batch(
-                    weather_embedding, 
-                    hfl_batch, 
-                    targets, 
+                    weather_embedding,
+                    hfl_batch,
+                    targets,
                     train_weather=train_weather
                 )
-                
+
                 # 3. Server 反向傳播 (累積梯度)
                 if train_weather and weather_grad is not None:
-                    # 反向傳播累積梯度到 Server Model 參數
                     weather_embedding.backward(weather_grad)
-                    
+
                 client_total_loss += loss
                 client_num_batches += 1
-                
+
                 # 釋放記憶體
                 del weather_embedding, weather_grad, loss
-            
+
             # 計算該客戶端的平均 Loss
             avg_loss = client_total_loss / client_num_batches if client_num_batches > 0 else 0
             client_losses.append(avg_loss)
             print(f"    V {client_name}: Train Loss = {avg_loss:.6f}")
-            
-            if train_weather:
-                client_grad_lists.append(server.capture_weather_model_grads())
+
+            if train_weather and client_num_batches > 0:
+                # 擷取累積梯度並除以 batch 數量 (取平均)
+                # 防止梯度與 FedAvg 樣本數加權產生二次加權
+                raw_grads = server.capture_weather_model_grads()
+                avg_grads = [g / client_num_batches for g in raw_grads]
+                client_grad_lists.append(avg_grads)
                 client_sample_counts.append(len(train_loader.dataset))
                 server.zero_weather_model_grad()
-            
-            # --- 驗證階段 ---
-            client_val_loss = 0
-            val_batches = 0
-            
-            for weather_batch, hfl_batch, targets in val_loader:
-                 weather_batch = weather_batch.to(device)
-                 
-                 # Eval mode, no grad
-                 weather_embedding = server.compute_weather_embeddings(
-                     weather_batch, 
-                     requires_grad=False
-                 )
-                 
-                 l = client.evaluate_batch(weather_embedding, hfl_batch, targets)
-                 client_val_loss += l
-                 val_batches += 1
-                 
-                 del weather_embedding
-            
-            avg_val_loss = client_val_loss / val_batches if val_batches > 0 else 0
-            client_val_losses.append(avg_val_loss)
-            print(f"      {client_name}: Val Loss = {avg_val_loss:.6f}")
-            
+
         # === Server FedAvg 聚合並更新 Weather Model ===
         if train_weather and client_grad_lists:
             aggregated_grads = server.aggregate_weather_gradients(
                 client_grad_lists,
                 client_sample_counts
             )
-            server.apply_aggregated_gradients(aggregated_grads)
-            print(f"    V Global Weather Model updated (FedAvg)")
+            if aggregated_grads:  # 可能因 NaN/Inf 過濾後為空
+                server.apply_aggregated_gradients(aggregated_grads)
+                print(f"    V Global Weather Model updated (FedAvg)")
+
+        # === 驗證所有客戶端 (穩定的早停信號) ===
+        all_val_losses = []
+        for client_name in client_names:
+            cl = clients[client_name]
+            val_loader = client_dataloaders[client_name]['val']
+
+            client_val_loss = 0
+            val_batches = 0
+            for weather_batch, hfl_batch, targets in val_loader:
+                weather_batch = weather_batch.to(device)
+                weather_embedding = server.compute_weather_embeddings(
+                    weather_batch, requires_grad=False
+                )
+                l = cl.evaluate_batch(weather_embedding, hfl_batch, targets)
+                client_val_loss += l
+                val_batches += 1
+                del weather_embedding
+
+            avg_val = client_val_loss / val_batches if val_batches > 0 else 0
+            all_val_losses.append(avg_val)
 
         # 全局評估
-        avg_train_loss = sum(client_losses) / len(client_losses)
-        avg_val_loss = sum(client_val_losses) / len(client_val_losses)
+        avg_train_loss = sum(client_losses) / len(client_losses) if client_losses else 0
+        avg_val_loss = sum(all_val_losses) / len(all_val_losses) if all_val_losses else 0
 
         print(f"\n  [Round Results]")
-        print(f"    Average train loss: {avg_train_loss:.6f}")
-        print(f"    Average val loss: {avg_val_loss:.6f}")
+        print(f"    Average train loss ({len(selected_clients)} clients): {avg_train_loss:.6f}")
+        print(f"    Average val loss (all {len(client_names)} clients): {avg_val_loss:.6f}")
 
-        # 早停檢查
-        should_stop = server.evaluate_global(avg_train_loss, avg_val_loss, selected_clients)
+        # 早停檢查 (使用所有客戶端的驗證損失，避免客戶端抽樣噪聲)
+        should_stop, is_best = server.evaluate_global(avg_train_loss, avg_val_loss, selected_clients)
+
+        # 保存最佳 Fusion Models (與最佳 Weather Model 同步)
+        if is_best:
+            for cn, cl in clients.items():
+                fp = os.path.join(config.model_save_path, f"best_{cn}_fusion_model.pth")
+                cl.save_fusion_model(fp)
+            print(f"    V Best models saved (val loss: {avg_val_loss:.6f})")
+
         if should_stop:
             print(f"\nEarly stopping triggered, training ended at round {round_idx + 1}")
             break
 
+        # 學習率調度
+        for cn in client_names:
+            fusion_schedulers[cn].step()
+        server_scheduler.step()
+
         # 定期評估
         if (round_idx + 1) % config.eval_interval == 0:
+            current_lr = fusion_schedulers[client_names[0]].get_last_lr()[0]
             print(f"\n  [Evaluation Summary - Round {round_idx + 1}]")
             print(f"    Best val loss: {server.best_val_loss:.6f}")
             print(f"    Early stopping counter: {server.patience_counter}/{config.early_stopping_patience}")
+            print(f"    Current learning rate: {current_lr:.6f}")
 
-    # === 步驟 7: 保存模型 ===
+    # === 步驟 8: 保存最終模型 ===
     print(f"\n{'=' * 70}")
-    print("Saving models...")
+    print("Saving final models...")
     print(f"{'=' * 70}")
 
     server.save_final_model()
 
-    # 保存客戶端 Fusion Models
+    # 保存最終客戶端 Fusion Models
     for client_name, client in clients.items():
         fusion_path = os.path.join(
             config.model_save_path,
             f"{client_name}_fusion_model.pth"
         )
         client.save_fusion_model(fusion_path)
-        print(f"  V {client_name} Fusion Model saved")
+        print(f"  V {client_name} Fusion Model saved (final)")
 
-    # === 步驟 8: 訓練摘要 ===
+    # === 步驟 9: 訓練摘要 ===
     summary = server.get_training_summary()
 
     print(f"\n{'=' * 70}")
@@ -595,6 +618,8 @@ def train(args):
     print(f"  - Final val loss: {summary['final_val_loss']:.6f}")
 
     print(f"\nModels saved to: {config.model_save_path}/")
+    print(f"  - Best models: best_weather_model.pth + best_*_fusion_model.pth")
+    print(f"  - Final models: final_weather_model.pth + *_fusion_model.pth")
     print("=" * 70)
 
 

@@ -417,8 +417,7 @@ def main():
         weather_data_scaled, config.input_length, total_sequences
     )
 
-    hfl_scaler = load_scaler(os.path.join(config.data_path, "hfl_scaler.pkl"), "HFL")
-    target_scaler = load_scaler(os.path.join(config.data_path, "target_scaler.pkl"), "Target")
+    processed_dir = os.path.join(config.data_path, 'processed')
 
     print("\n初始化個性化 HFL 模型...")
     client_hfl_states = build_personalized_hfl_models(config, client_csv_files)
@@ -432,9 +431,17 @@ def main():
         max_seq_length=config.weather_max_seq_length,
         dropout=config.weather_dropout,
     ).to(device)
-    weather_ckpt = os.path.join(config.model_save_path, "final_weather_model.pth")
-    if not os.path.exists(weather_ckpt):
-        raise FileNotFoundError(f"找不到 Weather Model 權重：{weather_ckpt}")
+    # 優先載入最佳模型，若不存在則回退至最終模型
+    best_weather_ckpt = os.path.join(config.model_save_path, "best_weather_model.pth")
+    final_weather_ckpt = os.path.join(config.model_save_path, "final_weather_model.pth")
+    if os.path.exists(best_weather_ckpt):
+        weather_ckpt = best_weather_ckpt
+        print(f"  V 載入最佳 Weather Model: {weather_ckpt}")
+    elif os.path.exists(final_weather_ckpt):
+        weather_ckpt = final_weather_ckpt
+        print(f"  ! 最佳模型不存在，載入最終 Weather Model: {weather_ckpt}")
+    else:
+        raise FileNotFoundError(f"找不到 Weather Model 權重：{best_weather_ckpt} 或 {final_weather_ckpt}")
     weather_model.load_state_dict(torch.load(weather_ckpt, map_location=device))
     weather_model.eval()
 
@@ -442,6 +449,16 @@ def main():
     for csv_file in client_csv_files:
         client_name = os.path.basename(csv_file).replace(".csv", "")
         print(f"\n=== 測試 {client_name} ===")
+
+        # 載入 per-client scalers (與 PerFedAvg 前處理一致)
+        hfl_scaler = load_scaler(
+            os.path.join(processed_dir, f"{client_name}_feature_scaler.pkl"),
+            f"{client_name} HFL"
+        )
+        target_scaler = load_scaler(
+            os.path.join(processed_dir, f"{client_name}_target_scaler.pkl"),
+            f"{client_name} Target"
+        )
 
         test_loader, test_size = prepare_client_test_loader(
             csv_file, weather_sequences, hfl_scaler, target_scaler, config
@@ -458,9 +475,16 @@ def main():
             hfl_model_state_dict=client_state,
         )
 
-        fusion_path = os.path.join(config.model_save_path, f"{client_name}_fusion_model.pth")
-        if not os.path.exists(fusion_path):
-            print(f"  ✗ 找不到 Fusion Model：{fusion_path}")
+        # 優先載入最佳 Fusion Model，若不存在則回退至最終模型
+        best_fusion_path = os.path.join(config.model_save_path, f"best_{client_name}_fusion_model.pth")
+        final_fusion_path = os.path.join(config.model_save_path, f"{client_name}_fusion_model.pth")
+        if os.path.exists(best_fusion_path):
+            fusion_path = best_fusion_path
+        elif os.path.exists(final_fusion_path):
+            fusion_path = final_fusion_path
+            print(f"  ! {client_name}: 最佳 Fusion Model 不存在，使用最終模型")
+        else:
+            print(f"  ✗ 找不到 Fusion Model：{best_fusion_path} 或 {final_fusion_path}")
             continue
         client.load_fusion_model(fusion_path)
         client.fusion_model.eval()

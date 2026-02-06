@@ -50,7 +50,13 @@ def load_config(config_path="config.yaml"):
     training_strategy = fl_config['training_strategy']
     config.phase0_rounds = training_strategy.get('phase0_rounds', 5)  # Phase 0: Fusion 預熱期 (預設 5 輪)
     config.phase1_rounds = training_strategy['phase1_rounds']          # Phase 1: 聯合訓練期
-    config.phase2_rounds = training_strategy['phase2_rounds']          # Phase 2: 通訊優化期
+    # Phase 2 輪數自動計算，確保三階段總和 = 全局輪數
+    config.phase2_rounds = config.K - config.phase0_rounds - config.phase1_rounds
+    declared_phase2 = training_strategy.get('phase2_rounds', config.phase2_rounds)
+    if declared_phase2 != config.phase2_rounds:
+        print(f"Note: phase2_rounds auto-calculated as {config.phase2_rounds} "
+              f"(K={config.K} - phase0={config.phase0_rounds} - phase1={config.phase1_rounds}), "
+              f"overriding config value {declared_phase2}")
     config.phase2_fusion_freq = training_strategy['phase2_fusion_freq']
 
     # === 本地訓練配置 ===
@@ -58,6 +64,7 @@ def load_config(config_path="config.yaml"):
     config.tau = local_config['local_epochs']
     config.beta = local_config['learning_rate']
     config.batch_size = local_config['batch_size']
+    config.gradient_clip_norm = local_config.get('gradient_clip_norm', 1.0)
 
     # === Weather Model 配置 (雲端) ===
     weather_config = config_dict['weather_model']

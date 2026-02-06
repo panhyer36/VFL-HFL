@@ -139,11 +139,13 @@ class VFLServer:
         三階段策略通訊分析:
         - Phase 0: 無 Weather Model 更新 (0 次通訊)
         - Phase 1: 每輪更新 Weather Model (phase1_rounds 次通訊)
-        - Phase 2: 週期性更新 (phase2_rounds / (phase2_fusion_freq + 1) 次通訊)
+        - Phase 2: 週期性更新 (actual_phase2 / (phase2_fusion_freq + 1) 次通訊)
         """
         phase0_updates = 0  # Phase 0 不更新 Weather Model
         phase1_updates = self.config.phase1_rounds
-        phase2_updates = self.config.phase2_rounds // (self.config.phase2_fusion_freq + 1)
+        # 使用實際 Phase 2 輪數 (已由 config.py 自動計算為 K - phase0 - phase1)
+        actual_phase2 = self.config.phase2_rounds
+        phase2_updates = actual_phase2 // (self.config.phase2_fusion_freq + 1)
         total_updates = phase0_updates + phase1_updates + phase2_updates
         total_rounds = self.config.K
         saving = (1 - total_updates / total_rounds) * 100
@@ -253,9 +255,10 @@ class VFLServer:
         FedAvg 梯度聚合 - Weather Model
 
         聚合策略:
-        1. 加權平均: 根據客戶端數據量加權
-        2. 正規化: 確保權重總和為 1
-        3. 參數對應: 逐參數進行加權平均
+        1. NaN/Inf 過濾: 跳過包含異常梯度的客戶端
+        2. 加權平均: 根據客戶端數據量加權
+        3. 正規化: 確保權重總和為 1
+        4. 參數對應: 逐參數進行加權平均
 
         Args:
             client_gradients: 每個客戶端的梯度列表
@@ -263,22 +266,37 @@ class VFLServer:
             client_weights: 每個客戶端的數據量
 
         Returns:
-            aggregated_grads: 聚合後的梯度列表
+            aggregated_grads: 聚合後的梯度列表 (若全部異常則返回空列表)
         """
         if not client_gradients:
             return []
 
+        # === NaN/Inf 過濾: 跳過包含異常梯度的客戶端 ===
+        valid_indices = []
+        for i, grads in enumerate(client_gradients):
+            if all(torch.isfinite(g).all() for g in grads):
+                valid_indices.append(i)
+            else:
+                print(f"  ! Warning: Client {i} has NaN/Inf gradients, skipping in aggregation")
+
+        if not valid_indices:
+            print("  ! Warning: All client gradients contain NaN/Inf, skipping Weather Model update")
+            return []
+
+        filtered_gradients = [client_gradients[i] for i in valid_indices]
+        filtered_weights = [client_weights[i] for i in valid_indices]
+
         # 正規化權重
-        total_weight = sum(client_weights)
-        normalized_weights = [w / total_weight for w in client_weights]
+        total_weight = sum(filtered_weights)
+        normalized_weights = [w / total_weight for w in filtered_weights]
 
         # 逐參數聚合
         aggregated_grads = []
-        num_params = len(client_gradients[0])
+        num_params = len(filtered_gradients[0])
 
         for param_idx in range(num_params):
             weighted_grad = None
-            for client_idx, grads in enumerate(client_gradients):
+            for client_idx, grads in enumerate(filtered_gradients):
                 if weighted_grad is None:
                     weighted_grad = grads[param_idx] * normalized_weights[client_idx]
                 else:
@@ -414,7 +432,7 @@ class VFLServer:
         avg_train_loss: float,
         avg_val_loss: float,
         selected_clients: List[str]
-    ) -> bool:
+    ) -> tuple:
         """
         全局評估與早停檢查
 
@@ -424,7 +442,7 @@ class VFLServer:
             selected_clients: 本輪參與的客戶端
 
         Returns:
-            should_stop: 是否應該早停
+            (should_stop, is_best): 是否應該早停, 是否為新最佳模型
         """
         # 記錄歷史
         self.history['train_loss'].append(avg_train_loss)
@@ -433,10 +451,12 @@ class VFLServer:
 
         # 早停檢查
         should_stop = False
+        is_best = False
         if avg_val_loss < self.best_val_loss - self.config.early_stopping_min_delta:
             self.best_val_loss = avg_val_loss
             self.patience_counter = 0
-            # 保存最佳模型
+            is_best = True
+            # 保存最佳 Weather Model
             self.save_best_model()
         else:
             self.patience_counter += 1
@@ -444,7 +464,7 @@ class VFLServer:
                 print(f"\nEarly stopping triggered (patience={self.config.early_stopping_patience})")
                 should_stop = True
 
-        return should_stop
+        return should_stop, is_best
 
     def save_best_model(self):
         """保存最佳全局 Weather Model"""
