@@ -37,7 +37,7 @@ import requests
 from config import load_config
 from src.Server import VFLServer
 from src.Client import VFLClient
-from src.Personalizer import initialize_personalized_models
+from src.Personalizer import initialize_personalized_models, save_personalized_models
 
 # 載入環境變數
 load_dotenv()
@@ -380,6 +380,10 @@ def train(args):
                         client_hfl_models[client_name] = global_hfl_model.state_dict()
 
                 print(f"\n  V Completed personalization adaptation for {len(client_hfl_models)} clients")
+
+                # 保存個性化 HFL 模型到磁碟
+                save_personalized_models(client_hfl_models, config.model_save_path)
+                print(f"  V Personalized HFL models saved to: {config.model_save_path}/")
             else:
                 print(f"  ! HFL global model file not found: {config.hfl_model_path}")
                 print(f"  -> Will use randomly initialized HFL model")

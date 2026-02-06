@@ -320,7 +320,7 @@ def save_personalized_models(
 
     print(f"\nSaving personalized models to: {save_dir}")
     for client_name, state_dict in client_models.items():
-        save_path = os.path.join(save_dir, f"{client_name}_personalized.pth")
+        save_path = os.path.join(save_dir, f"{client_name}_hfl_personalized.pth")
         torch.save(state_dict, save_path)
         print(f"  V {client_name} -> {save_path}")
 

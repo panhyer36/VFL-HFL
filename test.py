@@ -44,7 +44,6 @@ from train import create_weather_sequences, load_weather_data
 from src.Client import VFLClient
 from src.DataLoader import SequenceCSVDataset
 from src.Model import TransformerModel
-from src.Personalizer import personalize_model_for_client
 from src.Trainer import FederatedTrainer
 
 
@@ -73,47 +72,33 @@ def create_sequences(weather, hfl, targets, seq_len):
 def build_personalized_hfl_models(
     config, client_csv_files: List[str]
 ) -> Dict[str, Dict[str, torch.Tensor]]:
+    """載入訓練時已保存的個性化 HFL 模型
+
+    從 config.model_save_path 目錄中載入每個 client 的
+    {client_name}_hfl_personalized.pth 檔案，而非重新執行個性化適應。
+
+    Raises:
+        FileNotFoundError: 若找不到某個 client 的個性化模型檔案
+    """
     client_states = {}
     if not (config.use_personalized_hfl and config.hfl_model_path):
         return client_states
-    if not os.path.exists(config.hfl_model_path):
-        print(f"[WARN] 找不到 HFL 全局模型: {config.hfl_model_path}")
-        return client_states
-
-    global_hfl = TransformerModel(
-        feature_dim=config.hfl_feature_dim,
-        d_model=config.hfl_d_model,
-        nhead=config.hfl_nhead,
-        num_layers=config.hfl_num_layers,
-        output_dim=config.hfl_output_dim,
-        max_seq_length=config.hfl_max_seq_length,
-        dropout=config.hfl_dropout,
-    ).to(config.device)
-    global_hfl.load_state_dict(torch.load(config.hfl_model_path, map_location=config.device))
-    global_hfl.eval()
 
     for csv_file in client_csv_files:
         client_name = os.path.basename(csv_file).replace(".csv", "")
-        try:
-            dataset = SequenceCSVDataset(
-                csv_path=os.path.dirname(csv_file),
-                csv_name=client_name,
-                input_len=config.input_length,
-                output_len=config.output_length,
-                features=config.hfl_features,
-                target=config.target,
-                save_path=os.path.dirname(csv_file),
-                train_ratio=config.train_ratio,
-                val_ratio=config.val_ratio,
-                split_type="time_based",
-                fit_scalers=False,
+        model_path = os.path.join(
+            config.model_save_path, f"{client_name}_hfl_personalized.pth"
+        )
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"找不到 {client_name} 的個性化 HFL 模型: {model_path}\n"
+                f"請先執行 train.py 以生成個性化 HFL 模型檔案。"
             )
-            state = personalize_model_for_client(
-                global_model=global_hfl, dataset=dataset, config=config, client_name=client_name
-            )
-            client_states[client_name] = state
-        except Exception as exc:
-            print(f"[WARN] 個性化 {client_name} 失敗: {exc}")
+        state = torch.load(model_path, map_location=config.device)
+        client_states[client_name] = state
+        print(f"  V 載入個性化 HFL 模型: {client_name}")
+
+    print(f"  V 成功載入 {len(client_states)} 個個性化 HFL 模型")
     return client_states
 
 
