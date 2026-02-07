@@ -98,6 +98,12 @@ def load_config(config_path="config.yaml"):
     config.fusion_output_dim = fusion_config['output_dim']
     config.fusion_dropout = fusion_config['dropout']
     config.fusion_adapter_bottleneck_dim = fusion_config.get('adapter_bottleneck_dim', 64)
+    config.fusion_use_cross_attention = fusion_config.get('use_cross_attention', False)
+    config.fusion_cross_attention_dim = fusion_config.get('cross_attention_dim', 64)
+
+    # === 正則化配置 ===
+    reg_config = config_dict.get('regularization', {})
+    config.lambda_decorr = reg_config.get('lambda_decorr', 0.01)
 
     # === 數據配置 ===
     data_config = config_dict['data']

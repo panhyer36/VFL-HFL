@@ -53,6 +53,7 @@ class VFLClient:
         self.config = config
         self.device = device
         self.criterion = nn.MSELoss()
+        self.lambda_decorr = getattr(config, 'lambda_decorr', 0.01)
 
         print(f"\n{'=' * 70}")
         print(f"VFL Client Initialization: {client_id}")
@@ -95,7 +96,9 @@ class VFLClient:
             hidden_dim=config.fusion_hidden_dim,
             output_dim=config.fusion_output_dim,
             dropout=config.fusion_dropout,
-            adapter_bottleneck_dim=getattr(config, 'fusion_adapter_bottleneck_dim', 64)
+            adapter_bottleneck_dim=getattr(config, 'fusion_adapter_bottleneck_dim', 64),
+            use_cross_attention=getattr(config, 'fusion_use_cross_attention', True),
+            cross_attention_dim=getattr(config, 'fusion_cross_attention_dim', 64)
         ).to(device)
 
         fusion_params = sum(p.numel() for p in self.fusion_model.parameters())
@@ -113,6 +116,20 @@ class VFLClient:
 
         print(f"Device: {device}")
         print(f"{'=' * 70}")
+
+    def _compute_decorr_loss(self, embeddings):
+        """計算去相關損失，防止嵌入維度坍縮 (FedDecorr)"""
+        batch_size = embeddings.size(0)
+        if batch_size < 2:
+            return torch.tensor(0.0, device=embeddings.device)
+
+        centered = embeddings - embeddings.mean(dim=0, keepdim=True)
+        cov = (centered.T @ centered) / (batch_size - 1)
+        std = cov.diag().sqrt().clamp(min=1e-8)
+        corr = cov / (std.unsqueeze(0) * std.unsqueeze(1))
+
+        eye = torch.eye(corr.size(0), device=corr.device)
+        return (corr - eye).pow(2).mean()
 
     def train_batch(
         self,
@@ -151,11 +168,21 @@ class VFLClient:
         with torch.no_grad():
             hfl_embedding = self.hfl_model.forward_embedding(hfl_batch)
 
-        # Fusion 預測
-        predictions = self.fusion_model(weather_embedding, hfl_embedding)
+        # Fusion 預測 (同時獲取 adapted embeddings 用於 FedDecorr)
+        predictions, adapted_w, adapted_h = self.fusion_model(
+            weather_embedding, hfl_embedding, return_adapted=True
+        )
 
-        # 計算損失
-        loss = self.criterion(predictions, targets)
+        # 計算損失 (MSE + FedDecorr 去相關正則化)
+        mse_loss = self.criterion(predictions, targets)
+        if self.lambda_decorr > 0:
+            decorr_loss = (
+                self._compute_decorr_loss(adapted_w) +
+                self._compute_decorr_loss(adapted_h)
+            ) / 2
+            loss = mse_loss + self.lambda_decorr * decorr_loss
+        else:
+            loss = mse_loss
 
         # 反向傳播
         self.fusion_optimizer.zero_grad()

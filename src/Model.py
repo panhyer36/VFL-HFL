@@ -301,6 +301,58 @@ class EmbeddingAdapter(nn.Module):
         return x + self.adapter(x)
 
 
+class CrossAttentionLayer(nn.Module):
+    """
+    輕量級交叉注意力 — 將 Weather 和 HFL 嵌入視為 2-token 序列，
+    透過多頭自注意力捕捉跨模態交互。
+
+    使用較小的投影維度 (d_attn) 控制參數量。
+    參數量: 4 * d_model * d_attn + d_model * 2 ≈ 66K (d_attn=64)
+    """
+    def __init__(self, d_model, d_attn=64, nhead=4, dropout=0.1):
+        super().__init__()
+        self.nhead = nhead
+        self.d_k = d_attn // nhead  # 每頭維度
+
+        self.W_q = nn.Linear(d_model, d_attn)
+        self.W_k = nn.Linear(d_model, d_attn)
+        self.W_v = nn.Linear(d_model, d_attn)
+        self.W_o = nn.Linear(d_attn, d_model)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in [self.W_q, self.W_k, self.W_v, self.W_o]:
+            nn.init.xavier_uniform_(m.weight)
+            nn.init.zeros_(m.bias)
+
+    def forward(self, emb_a, emb_b):
+        """
+        Args:
+            emb_a: Weather 適配後嵌入 (B, d_model)
+            emb_b: HFL 適配後嵌入 (B, d_model)
+        Returns:
+            enriched_a, enriched_b: 交叉注意力後的嵌入 (B, d_model)
+        """
+        tokens = torch.stack([emb_a, emb_b], dim=1)  # (B, 2, d_model)
+        B, S, D = tokens.shape
+
+        Q = self.W_q(tokens).view(B, S, self.nhead, self.d_k).transpose(1, 2)
+        K = self.W_k(tokens).view(B, S, self.nhead, self.d_k).transpose(1, 2)
+        V = self.W_v(tokens).view(B, S, self.nhead, self.d_k).transpose(1, 2)
+
+        attn = (Q @ K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        attn = torch.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+
+        out = (attn @ V).transpose(1, 2).contiguous().view(B, S, -1)
+        out = self.W_o(out)
+
+        tokens = self.norm(tokens + self.dropout(out))
+        return tokens[:, 0], tokens[:, 1]
+
+
 class FusionModel(nn.Module):
     """
     融合模型 - 用於垂直聯邦學習（Vertical Federated Learning, VFL）
@@ -332,7 +384,8 @@ class FusionModel(nn.Module):
 
     def __init__(self, embedding_dim_party_a, embedding_dim_party_b,
                  hidden_dim=256, output_dim=1, dropout=0.1,
-                 adapter_bottleneck_dim=64):
+                 adapter_bottleneck_dim=64,
+                 use_cross_attention=True, cross_attention_dim=64):
         """
         初始化融合模型
 
@@ -343,6 +396,8 @@ class FusionModel(nn.Module):
             output_dim: 輸出維度（預測電力需求，通常為1）
             dropout: Dropout比例，用於正則化
             adapter_bottleneck_dim: Adapter 瓶頸維度 (0 = 不使用 adapter)
+            use_cross_attention: 是否使用交叉注意力 (方案 6)
+            cross_attention_dim: 交叉注意力投影維度
         """
         super().__init__()
 
@@ -387,81 +442,88 @@ class FusionModel(nn.Module):
             nn.Linear(hidden_dim // 2, output_dim)
         )
 
-        # === 可選：注意力機制 ===
-        # 學習如何平衡雙方特徵的重要性
-        self.use_attention = True
-        if self.use_attention:
-            self.attention_party_a = nn.Linear(embedding_dim_party_a, 1)
-            self.attention_party_b = nn.Linear(embedding_dim_party_b, 1)
+        # === 交叉注意力 (方案 6) ===
+        self.use_cross_attention = use_cross_attention
+        if self.use_cross_attention:
+            self.cross_attention_layer = CrossAttentionLayer(
+                d_model=embedding_dim_party_a,
+                d_attn=cross_attention_dim,
+                nhead=4,
+                dropout=dropout
+            )
+
+        # === 逐元素門控 (方案 1，取代標量注意力) ===
+        gate_input_dim = embedding_dim_party_a + embedding_dim_party_b  # 512
+        gate_bottleneck = adapter_bottleneck_dim if adapter_bottleneck_dim > 0 else 64
+        self.element_gate = nn.Sequential(
+            nn.Linear(gate_input_dim, gate_bottleneck),       # 512 → 64
+            nn.ReLU(),
+            nn.Linear(gate_bottleneck, embedding_dim_party_a),  # 64 → 256
+            nn.Sigmoid()
+        )
 
         # 權重初始化
         self.init_weights()
 
     def init_weights(self):
-        """初始化權重: fusion_network 使用 Kaiming (適合 ReLU), 注意力層使用 Xavier"""
+        """初始化權重: fusion_network 使用 Kaiming (適合 ReLU), 門控層使用 Kaiming"""
         # Fusion network 使用 ReLU 激活，Kaiming 初始化更合適
         for m in self.fusion_network.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-        # 注意力層使用 softmax，Xavier 初始化更合適
-        if self.use_attention:
-            nn.init.xavier_uniform_(self.attention_party_a.weight)
-            nn.init.xavier_uniform_(self.attention_party_b.weight)
-            nn.init.zeros_(self.attention_party_a.bias)
-            nn.init.zeros_(self.attention_party_b.bias)
-        # EmbeddingAdapter 已在自己的 __init__ 中完成零初始化，不在此重複
+        # Element-wise gate 使用 ReLU + Sigmoid, Kaiming 初始化隱藏層
+        for m in self.element_gate.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        # CrossAttentionLayer 和 EmbeddingAdapter 已在自己的 __init__ 中完成初始化，不在此重複
 
-    def forward(self, embedding_party_a, embedding_party_b):
+    def forward(self, embedding_party_a, embedding_party_b, return_adapted=False):
         """
         前向傳播 - 融合雙方嵌入並預測
 
         Args:
-            embedding_party_a: 參與方A的嵌入向量 (batch_size, embedding_dim_party_a)
-                即 Weather 嵌入，來自全局 Weather Model
-            embedding_party_b: 參與方B的嵌入向量 (batch_size, embedding_dim_party_b)
-                即 HFL 嵌入，來自本地凍結 HFL Model
+            embedding_party_a: Weather 嵌入 (batch_size, embedding_dim_party_a)
+            embedding_party_b: HFL 嵌入 (batch_size, embedding_dim_party_b)
+            return_adapted: 是否額外返回 adapted embeddings (用於 FedDecorr)
 
         Returns:
-            預測的電力需求 (batch_size, output_dim)
+            output: 預測的電力需求 (batch_size, output_dim)
+            adapted_a, adapted_b: (僅 return_adapted=True) adapted 嵌入
 
         **融合流程**：
-        1. Embedding Adapters: 個性化適配 Weather 和 HFL 嵌入
-        2. （可選）注意力加權：動態調整雙方特徵的重要性
-        3. 特徵拼接：組合雙方的嵌入向量
-        4. 深度融合：通過多層網絡學習特徵交互
-        5. 輸出預測：生成最終的電力需求預測值
+        1. Per-client Adapters: 個性化適配 Weather 和 HFL 嵌入
+        2. Cross-Attention: 捕捉天氣-用電雙向交互
+        3. Element-wise Gate: 逐元素門控融合
+        4. Concat + MLP: 深度融合預測
         """
-        # === Per-client Embedding Adapters ===
+        # Step 1: Per-client Embedding Adapters
         if self.use_adapter:
-            embedding_party_a = self.weather_adapter(embedding_party_a)
-            embedding_party_b = self.hfl_adapter(embedding_party_b)
-
-        # === 可選：注意力機制 ===
-        if self.use_attention:
-            # 計算每一方的注意力分數
-            attn_score_a = self.attention_party_a(embedding_party_a)  # (batch_size, 1)
-            attn_score_b = self.attention_party_b(embedding_party_b)  # (batch_size, 1)
-
-            # 使用softmax歸一化注意力權重
-            attn_scores = torch.cat([attn_score_a, attn_score_b], dim=1)  # (batch_size, 2)
-            attn_weights = torch.softmax(attn_scores, dim=1)  # (batch_size, 2)
-
-            # 應用注意力權重
-            weighted_embedding_a = embedding_party_a * attn_weights[:, 0:1]  # (batch_size, dim_a)
-            weighted_embedding_b = embedding_party_b * attn_weights[:, 1:2]  # (batch_size, dim_b)
-
-            # 拼接加權後的嵌入
-            fused_embedding = torch.cat([weighted_embedding_a, weighted_embedding_b], dim=1)
+            adapted_a = self.weather_adapter(embedding_party_a)
+            adapted_b = self.hfl_adapter(embedding_party_b)
         else:
-            # 直接拼接雙方嵌入
-            fused_embedding = torch.cat([embedding_party_a, embedding_party_b], dim=1)
+            adapted_a, adapted_b = embedding_party_a, embedding_party_b
 
-        # === 深度融合網絡 ===
-        # 通過多層MLP學習特徵交互並生成預測
-        output = self.fusion_network(fused_embedding)  # (batch_size, output_dim)
+        # Step 2: Cross-Attention (方案 6)
+        if self.use_cross_attention:
+            enriched_a, enriched_b = self.cross_attention_layer(adapted_a, adapted_b)
+        else:
+            enriched_a, enriched_b = adapted_a, adapted_b
 
+        # Step 3: Element-wise Gate (方案 1，取代原標量注意力)
+        gate = self.element_gate(torch.cat([enriched_a, enriched_b], dim=1))  # (B, 256)
+        weighted_a = enriched_a * gate
+        weighted_b = enriched_b * (1 - gate)
+
+        # Step 4: Concat + MLP
+        fused = torch.cat([weighted_a, weighted_b], dim=1)  # (B, 512)
+        output = self.fusion_network(fused)
+
+        if return_adapted:
+            return output, adapted_a, adapted_b
         return output
 
     def get_attention_weights(self, embedding_party_a, embedding_party_b):
@@ -469,21 +531,22 @@ class FusionModel(nn.Module):
         獲取雙方特徵的注意力權重，用於可解釋性分析
 
         Returns:
-            attention_weights: (batch_size, 2) 其中[:,0]是Party A的權重，[:,1]是Party B的權重
+            attention_weights: (batch_size, 2) 其中[:,0]是Party A (Weather) 的平均門控權重，
+                              [:,1]是Party B (HFL) 的平均門控權重
         """
-        # 先通過 Adapters (與 forward 一致)
+        # 與 forward 一致的流程
         if self.use_adapter:
-            embedding_party_a = self.weather_adapter(embedding_party_a)
-            embedding_party_b = self.hfl_adapter(embedding_party_b)
+            adapted_a = self.weather_adapter(embedding_party_a)
+            adapted_b = self.hfl_adapter(embedding_party_b)
+        else:
+            adapted_a, adapted_b = embedding_party_a, embedding_party_b
 
-        if not self.use_attention:
-            # 如果未使用注意力機制，返回均勻權重
-            batch_size = embedding_party_a.size(0)
-            return torch.ones(batch_size, 2, device=embedding_party_a.device) * 0.5
+        if self.use_cross_attention:
+            enriched_a, enriched_b = self.cross_attention_layer(adapted_a, adapted_b)
+        else:
+            enriched_a, enriched_b = adapted_a, adapted_b
 
-        attn_score_a = self.attention_party_a(embedding_party_a)
-        attn_score_b = self.attention_party_b(embedding_party_b)
-        attn_scores = torch.cat([attn_score_a, attn_score_b], dim=1)
-        attn_weights = torch.softmax(attn_scores, dim=1)
-
-        return attn_weights
+        # 計算逐元素門控值並取平均作為可解釋性指標
+        gate = self.element_gate(torch.cat([enriched_a, enriched_b], dim=1))  # (B, 256)
+        avg_gate = gate.mean(dim=1, keepdim=True)  # (B, 1)
+        return torch.cat([avg_gate, 1 - avg_gate], dim=1)  # (B, 2)

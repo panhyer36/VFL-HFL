@@ -53,6 +53,12 @@ fusion_model:
   output_dim: 1               # 輸出維度 (Power_Demand預測)
   dropout: 0.1                # Dropout率
   adapter_bottleneck_dim: 64  # Adapter 瓶頸維度 (0 = 不使用)
+  use_cross_attention: true   # 方案 6: 交叉注意力
+  cross_attention_dim: 64     # 交叉注意力投影維度
+
+# 正則化配置
+regularization:
+  lambda_decorr: 0.01           # 方案 2: FedDecorr 去相關損失權重
 
 # 數據配置
 data:
