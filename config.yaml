@@ -52,7 +52,7 @@ fusion_model:
   hidden_dim: 256             # 融合層隱藏維度
   output_dim: 1               # 輸出維度 (Power_Demand預測)
   dropout: 0.1                # Dropout率
-  adapter_bottleneck_dim: 64  # Weather Adapter 瓶頸維度 (0 = 不使用)
+  adapter_bottleneck_dim: 64  # Adapter 瓶頸維度 (0 = 不使用)
 
 # 數據配置
 data:

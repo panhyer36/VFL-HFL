@@ -249,34 +249,31 @@ class TransformerModel(nn.Module):
         return attention_weights
 
 
-class WeatherAdapter(nn.Module):
+class EmbeddingAdapter(nn.Module):
     """
-    Per-client Weather Embedding Adapter - 解決 VFL 數據異質性問題
+    Per-client Embedding Adapter - 解決 VFL 數據異質性問題
 
-    **問題背景**:
-    全局 Weather Model 透過 FedAvg 聚合所有客戶端的梯度，產生的嵌入偏向多數客戶端
-    (如住宅用戶)。少數異質客戶端 (如 Public_Building 商業建築) 的天氣響應模式截然不同，
-    全局嵌入對其並非最優。
-
-    **解決方案**:
-    在每個客戶端的 Fusion Model 中加入輕量級殘差瓶頸適配器：
-        e_w' = e_w + adapter(e_w)
-    讓每個客戶端學習如何「重新解讀」全局天氣嵌入，而不改動全局 Weather Model。
+    **適用場景**:
+    1. Weather Adapter: 全局 Weather Model 產生的嵌入偏向多數客戶端，
+       少數異質客戶端 (如 Public_Building) 需要個性化解讀。
+    2. HFL Adapter: Per-FedAvg 個性化品質參差不齊，且 HFL Model 原本為
+       獨立預測任務 (output_dim=1) 訓練，用作 VFL 特徵提取器時存在任務 gap，
+       需要適配至融合預測的語義空間。
 
     **殘差瓶頸結構**:
         adapter(x) = W2 · ReLU(LN(W1 · x + b1)) + b2
         其中 W1 ∈ R^{bottleneck×embedding}, W2 ∈ R^{embedding×bottleneck}
 
     **零初始化策略**:
-    W2 初始化為零，使得訓練初期 adapter(x) ≈ 0，即 e_w' ≈ e_w。
+    W2 初始化為零，使得訓練初期 adapter(x) ≈ 0，即 x' ≈ x。
     Adapter 從恆等映射出發，逐漸學習每個客戶端所需的修正量，
-    避免破壞已預訓練的全局天氣嵌入。
+    避免破壞已預訓練的嵌入品質。
     """
 
     def __init__(self, embedding_dim, bottleneck_dim=64, dropout=0.1):
         """
         Args:
-            embedding_dim: 輸入嵌入維度 (與 Weather Model 的 d_model 一致)
+            embedding_dim: 輸入嵌入維度
             bottleneck_dim: 瓶頸維度 (壓縮率 = embedding_dim / bottleneck_dim)
             dropout: Dropout 率
         """
@@ -321,7 +318,7 @@ class FusionModel(nn.Module):
 
     **融合策略**：
     採用深度融合（Deep Fusion）而非簡單拼接：
-    1. Weather Adapter: Per-client 適配器，個性化解讀全局天氣嵌入
+    1. 雙 Adapter: Per-client Weather/HFL 適配器，個性化解讀雙方嵌入
     2. 拼接雙方嵌入：組合來自不同數據源的特徵
     3. 多層非線性轉換：學習特徵間的交互關係
     4. Dropout正則化：防止過度依賴某一方的特徵
@@ -330,7 +327,7 @@ class FusionModel(nn.Module):
     - 靈活性：支持不同維度的輸入嵌入
     - 可擴展性：易於擴展到多方（>2）聯邦學習
     - 可解釋性：可以分析各方特徵的貢獻度
-    - 個性化：Weather Adapter 讓異質客戶端能適配全局天氣嵌入
+    - 個性化：雙 Adapter 讓異質客戶端能適配全局天氣嵌入及凍結 HFL 嵌入
     """
 
     def __init__(self, embedding_dim_party_a, embedding_dim_party_b,
@@ -345,7 +342,7 @@ class FusionModel(nn.Module):
             hidden_dim: 融合層的隱藏層維度
             output_dim: 輸出維度（預測電力需求，通常為1）
             dropout: Dropout比例，用於正則化
-            adapter_bottleneck_dim: Weather Adapter 瓶頸維度 (0 = 不使用 adapter)
+            adapter_bottleneck_dim: Adapter 瓶頸維度 (0 = 不使用 adapter)
         """
         super().__init__()
 
@@ -353,12 +350,18 @@ class FusionModel(nn.Module):
         self.embedding_dim_party_b = embedding_dim_party_b
         self.hidden_dim = hidden_dim
 
-        # === Per-client Weather Adapter ===
-        # 讓每個客戶端學習個性化的天氣嵌入解讀方式
+        # === Per-client Embedding Adapters ===
         self.use_adapter = adapter_bottleneck_dim > 0
         if self.use_adapter:
-            self.weather_adapter = WeatherAdapter(
+            # Weather Adapter: 個性化解讀全局天氣嵌入
+            self.weather_adapter = EmbeddingAdapter(
                 embedding_dim=embedding_dim_party_a,
+                bottleneck_dim=adapter_bottleneck_dim,
+                dropout=dropout
+            )
+            # HFL Adapter: 將凍結 HFL 嵌入適配至融合預測語義空間
+            self.hfl_adapter = EmbeddingAdapter(
+                embedding_dim=embedding_dim_party_b,
                 bottleneck_dim=adapter_bottleneck_dim,
                 dropout=dropout
             )
@@ -408,7 +411,7 @@ class FusionModel(nn.Module):
             nn.init.xavier_uniform_(self.attention_party_b.weight)
             nn.init.zeros_(self.attention_party_a.bias)
             nn.init.zeros_(self.attention_party_b.bias)
-        # WeatherAdapter 已在自己的 __init__ 中完成零初始化，不在此重複
+        # EmbeddingAdapter 已在自己的 __init__ 中完成零初始化，不在此重複
 
     def forward(self, embedding_party_a, embedding_party_b):
         """
@@ -424,15 +427,16 @@ class FusionModel(nn.Module):
             預測的電力需求 (batch_size, output_dim)
 
         **融合流程**：
-        1. Weather Adapter: 個性化適配全局天氣嵌入
+        1. Embedding Adapters: 個性化適配 Weather 和 HFL 嵌入
         2. （可選）注意力加權：動態調整雙方特徵的重要性
         3. 特徵拼接：組合雙方的嵌入向量
         4. 深度融合：通過多層網絡學習特徵交互
         5. 輸出預測：生成最終的電力需求預測值
         """
-        # === Per-client Weather Adapter ===
+        # === Per-client Embedding Adapters ===
         if self.use_adapter:
             embedding_party_a = self.weather_adapter(embedding_party_a)
+            embedding_party_b = self.hfl_adapter(embedding_party_b)
 
         # === 可選：注意力機制 ===
         if self.use_attention:
@@ -467,9 +471,10 @@ class FusionModel(nn.Module):
         Returns:
             attention_weights: (batch_size, 2) 其中[:,0]是Party A的權重，[:,1]是Party B的權重
         """
-        # 先通過 Adapter (與 forward 一致)
+        # 先通過 Adapters (與 forward 一致)
         if self.use_adapter:
             embedding_party_a = self.weather_adapter(embedding_party_a)
+            embedding_party_b = self.hfl_adapter(embedding_party_b)
 
         if not self.use_attention:
             # 如果未使用注意力機制，返回均勻權重
