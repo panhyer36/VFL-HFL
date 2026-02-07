@@ -97,6 +97,7 @@ def load_config(config_path="config.yaml"):
     config.fusion_hidden_dim = fusion_config['hidden_dim']
     config.fusion_output_dim = fusion_config['output_dim']
     config.fusion_dropout = fusion_config['dropout']
+    config.fusion_adapter_bottleneck_dim = fusion_config.get('adapter_bottleneck_dim', 64)
 
     # === 數據配置 ===
     data_config = config_dict['data']

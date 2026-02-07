@@ -10,9 +10,9 @@ federated_learning:
 
   # 三階段訓練策略配置
   training_strategy:
-    phase0_rounds: 10       # 階段0 (Fusion 預熱期): 只訓練 Fusion Model，Weather Model 凍結
-    phase1_rounds: 10      # 階段1 (聯合訓練期): 每輪都訓練 Fusion + Weather
-    phase2_rounds: 180     # 階段2 (通訊優化期): 4輪訓練 Fusion，1輪訓練 Weather (自動計算: K - phase0 - phase1)
+    phase0_rounds: 5       # 階段0 (Fusion 預熱期): 只訓練 Fusion Model，Weather Model 凍結
+    phase1_rounds: 194      # 階段1 (聯合訓練期): 每輪都訓練 Fusion + Weather
+    phase2_rounds: 1     # 階段2 (通訊優化期): 4輪訓練 Fusion，1輪訓練 Weather (自動計算: K - phase0 - phase1)
     phase2_fusion_freq: 4  # 階段2中每訓練多少輪 Fusion 後訓練一次 Weather
 
 # 本地訓練配置
@@ -52,6 +52,7 @@ fusion_model:
   hidden_dim: 256             # 融合層隱藏維度
   output_dim: 1               # 輸出維度 (Power_Demand預測)
   dropout: 0.1                # Dropout率
+  adapter_bottleneck_dim: 64  # Weather Adapter 瓶頸維度 (0 = 不使用)
 
 # 數據配置
 data:

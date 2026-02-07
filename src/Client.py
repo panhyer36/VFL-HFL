@@ -94,7 +94,8 @@ class VFLClient:
             embedding_dim_party_b=config.fusion_embedding_dim_hfl,
             hidden_dim=config.fusion_hidden_dim,
             output_dim=config.fusion_output_dim,
-            dropout=config.fusion_dropout
+            dropout=config.fusion_dropout,
+            adapter_bottleneck_dim=getattr(config, 'fusion_adapter_bottleneck_dim', 64)
         ).to(device)
 
         fusion_params = sum(p.numel() for p in self.fusion_model.parameters())
