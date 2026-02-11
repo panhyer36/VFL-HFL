@@ -89,6 +89,8 @@ def load_config(config_path="config.yaml"):
     config.hfl_max_seq_length = hfl_config['max_seq_length']
     config.hfl_dropout = hfl_config['dropout']
     config.freeze_hfl = hfl_config['freeze']
+    config.lora_rank = hfl_config.get('lora_rank', 0)
+    config.lora_alpha = hfl_config.get('lora_alpha', 4.0)
 
     # === Fusion Model 配置 (本地) ===
     fusion_config = config_dict['fusion_model']

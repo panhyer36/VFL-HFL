@@ -475,6 +475,19 @@ def main():
             hfl_model_state_dict=client_state,
         )
 
+        # 載入 LoRA 權重 (如果啟用)
+        if getattr(config, 'lora_rank', 0) > 0:
+            best_lora_path = os.path.join(config.model_save_path, f"best_{client_name}_lora_model.pth")
+            final_lora_path = os.path.join(config.model_save_path, f"{client_name}_lora_model.pth")
+            if os.path.exists(best_lora_path):
+                client.load_lora_model(best_lora_path)
+                print(f"  V 載入最佳 LoRA 權重: {client_name}")
+            elif os.path.exists(final_lora_path):
+                client.load_lora_model(final_lora_path)
+                print(f"  ! {client_name}: 最佳 LoRA 不存在，使用最終 LoRA 權重")
+            else:
+                print(f"  ! {client_name}: 找不到 LoRA 權重，使用初始化 LoRA")
+
         # 優先載入最佳 Fusion Model，若不存在則回退至最終模型
         best_fusion_path = os.path.join(config.model_save_path, f"best_{client_name}_fusion_model.pth")
         final_fusion_path = os.path.join(config.model_save_path, f"{client_name}_fusion_model.pth")

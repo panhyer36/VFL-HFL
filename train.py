@@ -413,6 +413,12 @@ def train(args):
         )
         clients[client_name] = client
 
+    # === 步驟 5.5: 初始凍結 LoRA (Phase 0) ===
+    if config.lora_rank > 0:
+        for client in clients.values():
+            client.set_lora_training(False)
+        print(f"\n  V LoRA parameters frozen (Phase 0 warmup)")
+
     # === 步驟 6: 初始化學習率調度器 ===
     fusion_schedulers = {}
     for client_name in client_names:
@@ -442,6 +448,12 @@ def train(args):
         print(f"Federated Learning Round [{round_idx + 1}/{config.K}]")
         print(f"Phase {phase_info['phase']} - {phase_info['phase_name']} [{phase_info['phase_round']}/{phase_info['phase_total']}]")
         print(f"{'─' * 70}")
+
+        # Phase 0 -> Phase 1 轉換時解凍 LoRA
+        if config.lora_rank > 0 and round_idx == config.phase0_rounds:
+            for client in clients.values():
+                client.set_lora_training(True)
+            print(f"  V LoRA parameters unfrozen (entering Phase 1)")
 
         # 根據階段顯示訓練模式
         if phase_info['phase'] == 0:
@@ -561,11 +573,14 @@ def train(args):
         # 早停檢查 (使用所有客戶端的驗證損失，避免客戶端抽樣噪聲)
         should_stop, is_best = server.evaluate_global(avg_train_loss, avg_val_loss, selected_clients)
 
-        # 保存最佳 Fusion Models (與最佳 Weather Model 同步)
+        # 保存最佳 Fusion Models + LoRA (與最佳 Weather Model 同步)
         if is_best:
             for cn, cl in clients.items():
                 fp = os.path.join(config.model_save_path, f"best_{cn}_fusion_model.pth")
                 cl.save_fusion_model(fp)
+                if config.lora_rank > 0:
+                    lp = os.path.join(config.model_save_path, f"best_{cn}_lora_model.pth")
+                    cl.save_lora_model(lp)
             print(f"    V Best models saved (val loss: {avg_val_loss:.6f})")
 
         if should_stop:
@@ -592,13 +607,19 @@ def train(args):
 
     server.save_final_model()
 
-    # 保存最終客戶端 Fusion Models
+    # 保存最終客戶端 Fusion Models + LoRA
     for client_name, client in clients.items():
         fusion_path = os.path.join(
             config.model_save_path,
             f"{client_name}_fusion_model.pth"
         )
         client.save_fusion_model(fusion_path)
+        if config.lora_rank > 0:
+            lora_path = os.path.join(
+                config.model_save_path,
+                f"{client_name}_lora_model.pth"
+            )
+            client.save_lora_model(lora_path)
         print(f"  V {client_name} Fusion Model saved (final)")
 
     # === 步驟 9: 訓練摘要 ===

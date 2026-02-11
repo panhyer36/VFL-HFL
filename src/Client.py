@@ -28,6 +28,10 @@ import numpy as np
 from typing import Tuple, Dict
 from torch.utils.data import DataLoader
 from src.Model import TransformerModel, FusionModel
+from src.LoRA import (
+    apply_lora_to_transformer, get_lora_state_dict, load_lora_state_dict,
+    set_lora_trainable, count_lora_params
+)
 
 
 class VFLClient:
@@ -84,8 +88,19 @@ class VFLClient:
             self.hfl_model.eval()
             print(f"  V HFL Model frozen")
 
+        # === LoRA 注入 HFL Transformer ===
+        self.lora_rank = getattr(config, 'lora_rank', 0)
+        self.lora_alpha = getattr(config, 'lora_alpha', 4.0)
+        self.lora_trainable = False  # Phase 0 預設凍結
+
+        if self.lora_rank > 0:
+            apply_lora_to_transformer(self.hfl_model, self.lora_rank, self.lora_alpha)
+            lora_total, lora_trainable = count_lora_params(self.hfl_model)
+            print(f"  V LoRA applied (rank={self.lora_rank}, alpha={self.lora_alpha})")
+            print(f"  V LoRA parameters: {lora_total:,} (trainable: {lora_trainable:,})")
+
         hfl_params = sum(p.numel() for p in self.hfl_model.parameters())
-        print(f"\nHFL Model (Local, Frozen):")
+        print(f"\nHFL Model (Local, Frozen + LoRA):")
         print(f"  - Feature dimension: {config.hfl_feature_dim}")
         print(f"  - Parameters: {hfl_params:,}")
 
@@ -107,9 +122,13 @@ class VFLClient:
         print(f"  - HFL embedding dimension: {config.fusion_embedding_dim_hfl}")
         print(f"  - Parameters: {fusion_params:,}")
 
-        # === 優化器 (只優化 Fusion Model) ===
+        # === 優化器 (Fusion Model + LoRA 參數) ===
+        optim_params = list(self.fusion_model.parameters())
+        if self.lora_rank > 0:
+            lora_params = [p for p in self.hfl_model.parameters() if p.requires_grad]
+            optim_params += lora_params
         self.fusion_optimizer = torch.optim.Adam(
-            self.fusion_model.parameters(),
+            optim_params,
             lr=config.beta,
             weight_decay=1e-4
         )
@@ -164,9 +183,12 @@ class VFLClient:
              weather_embedding = weather_embedding.detach().requires_grad_(True)
 
         # 前向傳播
-        # HFL 嵌入 (凍結)
-        with torch.no_grad():
+        # HFL 嵌入: LoRA trainable 時讓梯度流過 LoRA 參數
+        if self.lora_rank > 0 and self.lora_trainable:
             hfl_embedding = self.hfl_model.forward_embedding(hfl_batch)
+        else:
+            with torch.no_grad():
+                hfl_embedding = self.hfl_model.forward_embedding(hfl_batch)
 
         # Fusion 預測 (同時獲取 adapted embeddings 用於 FedDecorr)
         predictions, adapted_w, adapted_h = self.fusion_model(
@@ -190,11 +212,14 @@ class VFLClient:
 
         # 梯度裁剪 (防止梯度爆炸，特別是 Split Learning 跨網路梯度傳遞場景)
         if hasattr(self.config, 'gradient_clip_norm') and self.config.gradient_clip_norm > 0:
+            clip_params = list(self.fusion_model.parameters())
+            if self.lora_rank > 0 and self.lora_trainable:
+                clip_params += [p for p in self.hfl_model.parameters() if p.requires_grad]
             torch.nn.utils.clip_grad_norm_(
-                self.fusion_model.parameters(), self.config.gradient_clip_norm
+                clip_params, self.config.gradient_clip_norm
             )
 
-        # 更新 Fusion Model
+        # 更新 Fusion Model + LoRA 參數
         self.fusion_optimizer.step()
 
         # 提取 Weather 嵌入的梯度
@@ -427,6 +452,24 @@ class VFLClient:
 
         avg_test_loss = test_loss / num_batches if num_batches > 0 else 0.0
         return avg_test_loss, np.array(all_predictions), np.array(all_targets)
+
+    def set_lora_training(self, trainable: bool):
+        """設定 LoRA 訓練狀態 (Phase 0 凍結 / Phase 1+ 解凍)"""
+        self.lora_trainable = trainable
+        if self.lora_rank > 0:
+            set_lora_trainable(self.hfl_model, trainable)
+
+    def save_lora_model(self, save_path: str):
+        """保存 LoRA 權重"""
+        if self.lora_rank > 0:
+            state_dict = get_lora_state_dict(self.hfl_model)
+            torch.save(state_dict, save_path)
+
+    def load_lora_model(self, load_path: str):
+        """載入 LoRA 權重"""
+        if self.lora_rank > 0:
+            state_dict = torch.load(load_path, map_location=self.device)
+            load_lora_state_dict(self.hfl_model, state_dict)
 
     def save_fusion_model(self, save_path: str):
         """保存 Fusion Model"""

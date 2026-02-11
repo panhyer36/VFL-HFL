@@ -370,16 +370,17 @@ class FusionModel(nn.Module):
 
     **融合策略**：
     採用深度融合（Deep Fusion）而非簡單拼接：
-    1. 雙 Adapter: Per-client Weather/HFL 適配器，個性化解讀雙方嵌入
-    2. 拼接雙方嵌入：組合來自不同數據源的特徵
-    3. 多層非線性轉換：學習特徵間的交互關係
-    4. Dropout正則化：防止過度依賴某一方的特徵
+    1. Weather Adapter: Per-client 適配器，個性化解讀天氣嵌入
+    2. HFL 嵌入: 透過 LoRA 在 Transformer 內部做 per-client 適配 (外部不再使用 Adapter)
+    3. 拼接雙方嵌入：組合來自不同數據源的特徵
+    4. 多層非線性轉換：學習特徵間的交互關係
+    5. Dropout正則化：防止過度依賴某一方的特徵
 
     **架構優勢**：
     - 靈活性：支持不同維度的輸入嵌入
     - 可擴展性：易於擴展到多方（>2）聯邦學習
     - 可解釋性：可以分析各方特徵的貢獻度
-    - 個性化：雙 Adapter 讓異質客戶端能適配全局天氣嵌入及凍結 HFL 嵌入
+    - 個性化：Weather Adapter + HFL LoRA 讓異質客戶端能分別適配天氣嵌入及 HFL 嵌入
     """
 
     def __init__(self, embedding_dim_party_a, embedding_dim_party_b,
@@ -406,17 +407,12 @@ class FusionModel(nn.Module):
         self.hidden_dim = hidden_dim
 
         # === Per-client Embedding Adapters ===
+        # HFL Adapter 已移除，改由 LoRA 在 HFL Transformer 內部做 per-client 適配
         self.use_adapter = adapter_bottleneck_dim > 0
         if self.use_adapter:
             # Weather Adapter: 個性化解讀全局天氣嵌入
             self.weather_adapter = EmbeddingAdapter(
                 embedding_dim=embedding_dim_party_a,
-                bottleneck_dim=adapter_bottleneck_dim,
-                dropout=dropout
-            )
-            # HFL Adapter: 將凍結 HFL 嵌入適配至融合預測語義空間
-            self.hfl_adapter = EmbeddingAdapter(
-                embedding_dim=embedding_dim_party_b,
                 bottleneck_dim=adapter_bottleneck_dim,
                 dropout=dropout
             )
@@ -501,11 +497,12 @@ class FusionModel(nn.Module):
         4. Concat + MLP: 深度融合預測
         """
         # Step 1: Per-client Embedding Adapters
+        # Weather: 經 Adapter 適配; HFL: 經 LoRA 適配 (已在 Transformer 內部完成)
         if self.use_adapter:
             adapted_a = self.weather_adapter(embedding_party_a)
-            adapted_b = self.hfl_adapter(embedding_party_b)
         else:
-            adapted_a, adapted_b = embedding_party_a, embedding_party_b
+            adapted_a = embedding_party_a
+        adapted_b = embedding_party_b
 
         # Step 2: Cross-Attention (方案 6)
         if self.use_cross_attention:
@@ -537,9 +534,9 @@ class FusionModel(nn.Module):
         # 與 forward 一致的流程
         if self.use_adapter:
             adapted_a = self.weather_adapter(embedding_party_a)
-            adapted_b = self.hfl_adapter(embedding_party_b)
         else:
-            adapted_a, adapted_b = embedding_party_a, embedding_party_b
+            adapted_a = embedding_party_a
+        adapted_b = embedding_party_b
 
         if self.use_cross_attention:
             enriched_a, enriched_b = self.cross_attention_layer(adapted_a, adapted_b)

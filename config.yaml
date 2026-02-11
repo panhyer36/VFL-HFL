@@ -44,6 +44,8 @@ hfl_model:
   max_seq_length: 100      # 最大序列長度
   dropout: 0.1             # Dropout率
   freeze: true             # 是否凍結 HFL 模型 (使用 Per-FedAvg 個性化權重)
+  lora_rank: 8             # LoRA rank (0 = 停用 LoRA)
+  lora_alpha: 8.0          # LoRA scaling (scaling = alpha / rank)
 
 # 模型配置 - Fusion Model (本地客戶端)
 fusion_model:
