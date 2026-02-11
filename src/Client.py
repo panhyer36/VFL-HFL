@@ -95,6 +95,7 @@ class VFLClient:
 
         if self.lora_rank > 0:
             apply_lora_to_transformer(self.hfl_model, self.lora_rank, self.lora_alpha)
+            self.hfl_model.to(device)  # LoRA 新建的參數在 CPU，需移至正確設備
             lora_total, lora_trainable = count_lora_params(self.hfl_model)
             print(f"  V LoRA applied (rank={self.lora_rank}, alpha={self.lora_alpha})")
             print(f"  V LoRA parameters: {lora_total:,} (trainable: {lora_trainable:,})")
