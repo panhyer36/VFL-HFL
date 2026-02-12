@@ -424,6 +424,131 @@ class VFLServer:
 
         return embeddings
 
+    def download_weather_embeddings_compressed(
+        self,
+        weather_data: torch.Tensor,
+        client_z_old: torch.Tensor,
+        svd_rank: int
+    ):
+        """
+        下載端低秩殘差壓縮 (B-LEC): 傳送 delta_z 的截斷 SVD 分解
+
+        流程:
+        1. 計算 z_new = Weather Model 嵌入
+        2. delta_z = z_new - z_old
+        3. 截斷 SVD: delta_z ≈ A @ B
+        4. 只傳送 {A, B}，通訊量 O((N+D)×r) 取代 O(N×D)
+
+        Args:
+            weather_data: Weather 輸入數據 (N, seq_len, feature_dim)
+            client_z_old: 客戶端的舊快取嵌入 (N, D)，首輪為零張量
+            svd_rank: 截斷 SVD 的 rank
+
+        Returns:
+            A: (N, r) 左因子，若首輪未壓縮則為 None
+            B: (r, D) 右因子，若首輪未壓縮則為 None
+            z_new: (N, D) 完整嵌入 (Server 端保留，不傳送)
+            metrics: dict 壓縮品質指標
+        """
+        self.global_weather_model.eval()
+        with torch.no_grad():
+            z_new = self.global_weather_model.forward_embedding(weather_data)
+
+        # 首輪 z_old=0 時 delta_z 低秩近似品質差，直接傳送完整嵌入
+        if torch.all(client_z_old == 0):
+            metrics = {
+                'compressed': False,
+                'reason': 'first_round',
+            }
+            return None, None, z_new, metrics
+
+        delta_z = z_new - client_z_old
+
+        # 截斷 SVD 分解 (在 CPU 上執行以確保跨設備相容性)
+        try:
+            U, S, Vh = torch.linalg.svd(delta_z.float(), full_matrices=False)
+        except Exception:
+            # MPS 等設備可能不支持 SVD，回退到 CPU
+            delta_cpu = delta_z.float().cpu()
+            U, S, Vh = torch.linalg.svd(delta_cpu, full_matrices=False)
+            U, S, Vh = U.to(delta_z.device), S.to(delta_z.device), Vh.to(delta_z.device)
+
+        r = min(svd_rank, len(S))
+        A = U[:, :r] @ torch.diag(S[:r])   # (N, r)
+        B = Vh[:r, :]                        # (r, D)
+
+        # === 壓縮品質指標 ===
+        S_sq = S.float() ** 2
+        total_var = S_sq.sum().item()
+        explained_var = S_sq[:r].sum().item() / total_var if total_var > 0 else 1.0
+
+        recon = A @ B
+        recon_error_norm = (delta_z.float() - recon).norm().item()
+        delta_norm = delta_z.float().norm().item()
+        relative_error = recon_error_norm / delta_norm if delta_norm > 0 else 0.0
+
+        # 通訊量壓縮比
+        full_bytes = delta_z.nelement() * delta_z.element_size()
+        comp_bytes = (A.nelement() + B.nelement()) * A.element_size()
+
+        metrics = {
+            'compressed': True,
+            'svd_rank': r,
+            'explained_var': explained_var,
+            'relative_error': relative_error,
+            'delta_norm': delta_norm,
+            'full_bytes': full_bytes,
+            'comp_bytes': comp_bytes,
+            'byte_ratio': comp_bytes / full_bytes if full_bytes > 0 else 1.0,
+        }
+
+        return A, B, z_new, metrics
+
+    @staticmethod
+    def reconstruct_from_low_rank(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        z_old: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        從低秩分解重構嵌入: z_hat = z_old + A @ B
+
+        Args:
+            A: (N, r) 左因子
+            B: (r, D) 右因子
+            z_old: (N, D) 舊快取嵌入
+
+        Returns:
+            z_hat: (N, D) 重構後的嵌入
+        """
+        return z_old + A @ B
+
+    @staticmethod
+    def decompress_gradient(
+        compressed_values: torch.Tensor,
+        indices: torch.Tensor,
+        shape: torch.Size,
+        device: torch.device
+    ) -> torch.Tensor:
+        """
+        Server 端解壓縮 Top-k 稀疏梯度為密集張量
+
+        在 VFL 架構中，Client 上傳壓縮梯度後，Server 負責解壓縮再進行
+        FedAvg 聚合與反向傳播，確保解壓縮邏輯完全在 Server 端完成。
+
+        Args:
+            compressed_values: Top-k 壓縮值 (k,)
+            indices: Top-k 元素索引 (k,)
+            shape: 原始梯度形狀
+            device: 計算設備
+
+        Returns:
+            full_grad: 解壓縮後的密集梯度張量 (可直接進入 FedAvg 流程)
+        """
+        full_grad = torch.zeros(shape, device=device).flatten()
+        full_grad[indices] = compressed_values.to(device)
+        return full_grad.reshape(shape)
+
     def backward_weather_embeddings_chunked(
         self,
         weather_data: torch.Tensor,

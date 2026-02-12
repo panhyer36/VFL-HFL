@@ -130,6 +130,15 @@ personalization:
   personalization_steps: 3            # 個性化適應步數
   adaptation_lr: 0.001                  # 個性化適應學習率
 
+# B-LEC 通訊壓縮配置
+communication_compression:
+  download:
+    enabled: true              # 下載端低秩殘差壓縮 (SVD)
+    svd_rank: 16               # 截斷 SVD 的 rank (越小壓縮率越高，精度越低)
+  upload:
+    enabled: true              # 上傳端 Top-k Error Feedback 壓縮
+    top_k_ratio: 0.05          # Top-k 壓縮率 (保留前 5% 最大梯度元素)
+
 # 可視化配置
 visualization:
   save_plots: true         # 是否保存圖表

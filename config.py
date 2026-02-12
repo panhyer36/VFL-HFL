@@ -143,6 +143,15 @@ def load_config(config_path="config.yaml"):
     config.personalization_steps = personalization_config.get('personalization_steps', 10)
     config.adaptation_lr = personalization_config.get('adaptation_lr', 0.01)
 
+    # === B-LEC 通訊壓縮配置 ===
+    comm_config = config_dict.get('communication_compression', {})
+    download_config = comm_config.get('download', {})
+    upload_config = comm_config.get('upload', {})
+    config.download_compression_enabled = download_config.get('enabled', False)
+    config.svd_rank = download_config.get('svd_rank', 16)
+    config.upload_compression_enabled = upload_config.get('enabled', False)
+    config.top_k_ratio = upload_config.get('top_k_ratio', 0.05)
+
     # === 可視化配置 ===
     viz_config = config_dict['visualization']
     config.save_plots = viz_config['save_plots']

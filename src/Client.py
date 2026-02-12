@@ -138,6 +138,11 @@ class VFLClient:
         self.cached_weather_embeddings = None   # 快取的完整訓練集 Weather 嵌入
         self.weather_cache_version = -1         # 對應的 Weather Model 版本
 
+        # === B-LEC 上傳端 Error Feedback 壓縮 ===
+        self.error_buffer = None  # 殘差緩衝區，首次使用時初始化，跨輪次持續累積
+        self.top_k_ratio = getattr(config, 'top_k_ratio', 0.05)
+        self.upload_compression_enabled = getattr(config, 'upload_compression_enabled', False)
+
         print(f"Device: {device}")
         print(f"{'=' * 70}")
 
@@ -457,6 +462,72 @@ class VFLClient:
 
         avg_test_loss = test_loss / num_batches if num_batches > 0 else 0.0
         return avg_test_loss, np.array(all_predictions), np.array(all_targets)
+
+    def compress_gradient_with_error_feedback(
+        self,
+        gradient: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Size, dict]:
+        """
+        Top-k Error Feedback 梯度壓縮 (B-LEC)
+
+        流程:
+        1. v = gradient + error_buffer (累積殘差補償)
+        2. Top-k 選取絕對值最大的 k 個元素
+        3. error_buffer ← v - compressed (未傳送部分存入殘差，下輪補償)
+
+        數學保證: Error Feedback 確保長期梯度更新無偏性 (Unbiasedness)
+
+        Args:
+            gradient: 平均嵌入梯度 (N, D)
+
+        Returns:
+            compressed_values: Top-k 壓縮值 (k,)
+            indices: Top-k 元素索引 (k,)
+            shape: 原始梯度形狀 (用於解壓縮)
+            metrics: dict 壓縮品質指標
+        """
+        # 首次使用時初始化殘差緩衝區為零張量
+        if self.error_buffer is None:
+            self.error_buffer = torch.zeros_like(gradient)
+
+        # Error Feedback 累積: 補償上輪未傳送的殘差
+        v = gradient + self.error_buffer
+
+        # Top-k 壓縮: 取絕對值最大的前 k 個元素
+        k = max(1, int(v.numel() * self.top_k_ratio))
+        _, topk_indices = torch.topk(v.abs().flatten(), k)
+        compressed_values = v.flatten()[topk_indices]
+
+        # 更新殘差緩衝區: 未傳送部分存入 "存錢罐"
+        self.error_buffer = v.clone()
+        self.error_buffer.view(-1)[topk_indices] = 0
+
+        # === 壓縮品質指標 ===
+        grad_norm = gradient.norm().item()
+        v_norm = v.norm().item()
+        error_buf_norm = self.error_buffer.norm().item()
+        # 壓縮相對誤差: ||v - decompress(compress(v))|| / ||v||
+        approx_error = self.error_buffer.norm().item()  # = ||v - compressed||
+        relative_error = approx_error / v_norm if v_norm > 0 else 0.0
+        # 通訊量壓縮比
+        full_bytes = gradient.nelement() * gradient.element_size()
+        comp_bytes = compressed_values.nelement() * compressed_values.element_size() \
+                     + topk_indices.nelement() * topk_indices.element_size()
+
+        metrics = {
+            'k': k,
+            'total_elements': v.numel(),
+            'sparsity': k / v.numel(),
+            'grad_norm': grad_norm,
+            'ef_input_norm': v_norm,
+            'error_buf_norm': error_buf_norm,
+            'relative_error': relative_error,
+            'full_bytes': full_bytes,
+            'comp_bytes': comp_bytes,
+            'byte_ratio': comp_bytes / full_bytes if full_bytes > 0 else 1.0,
+        }
+
+        return compressed_values, topk_indices, v.shape, metrics
 
     def cache_weather_embeddings(self, embeddings: torch.Tensor, version: int):
         """快取 Weather 嵌入與對應版本號"""
