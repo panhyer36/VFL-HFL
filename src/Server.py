@@ -424,6 +424,34 @@ class VFLServer:
 
         return embeddings
 
+    def backward_weather_embeddings_chunked(
+        self,
+        weather_data: torch.Tensor,
+        embedding_grad: torch.Tensor,
+        chunk_size: int = 256
+    ):
+        """
+        分塊反向傳播 Weather Model，避免一次性存儲所有中間激活值導致 OOM
+
+        數學等價: Σ_chunks backward(chunk_grad) ≡ backward(full_grad)
+        因為每個樣本在 Weather Model 中是獨立計算的 (無跨樣本狀態)
+
+        Args:
+            weather_data: Weather 輸入數據 (N, seq_len, feature_dim)
+            embedding_grad: 嵌入梯度 (N, d_model)
+            chunk_size: 每次反向傳播的樣本數 (越小越省記憶體，越大越快)
+        """
+        self.global_weather_model.eval()  # eval mode: 與 no-grad forward 一致 (無 dropout)
+        self.global_optimizer.zero_grad()
+        N = weather_data.size(0)
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            chunk_emb = self.global_weather_model.forward_embedding(
+                weather_data[start:end]
+            )
+            chunk_emb.backward(embedding_grad[start:end])
+            del chunk_emb
+
     def evaluate_global(
         self,
         avg_train_loss: float,

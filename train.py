@@ -498,17 +498,18 @@ def train(args):
 
         if train_weather:
             # === 路徑 A: train_weather=True (Phase 1, Phase 2 更新輪) ===
-            # 流程: Server 一次性下發嵌入 → Client 逐 batch 訓練並累積嵌入梯度
-            #       → 累積完成後一次上傳 → Server 一次性反向傳播
+            # 流程: Server 一次性下發嵌入 (no-grad, 省記憶體) → Client 逐 batch 訓練並累積嵌入梯度
+            #       → 累積完成後一次上傳 → Server 分塊反向傳播 (避免 OOM)
 
             for client_name in selected_clients:
                 client = clients[client_name]
 
-                # 1. Server 一次性前向計算所有訓練集 Weather 嵌入 (保留計算圖)
+                # 1. Server 一次性前向計算所有訓練集 Weather 嵌入 (不保留計算圖，節省記憶體)
                 X_w_raw = client_dataloaders[client_name]['train_weather_raw']
-                all_embeddings = server.download_weather_embeddings(
-                    X_w_raw, requires_grad=True
-                )
+                with torch.no_grad():
+                    all_embeddings = server.download_weather_embeddings(
+                        X_w_raw, requires_grad=False
+                    )
                 server.record_download(client_name, all_embeddings)
 
                 # 2. Client 逐 batch 訓練，累積嵌入梯度
@@ -539,13 +540,14 @@ def train(args):
                 client_losses.append(avg_loss)
                 print(f"    V {client_name}: Train Loss = {avg_loss:.6f}")
 
-                # 3. 累積嵌入梯度取平均後一次上傳，Server 一次性反向傳播
+                # 3. 累積嵌入梯度取平均後一次上傳，Server 分塊反向傳播
                 if client_num_batches > 0:
                     avg_embedding_grad = accumulated_grad / client_num_batches
                     server.record_upload(client_name, [avg_embedding_grad])
 
-                    server.zero_weather_model_grad()
-                    all_embeddings.backward(avg_embedding_grad)
+                    server.backward_weather_embeddings_chunked(
+                        X_w_raw, avg_embedding_grad
+                    )
 
                     raw_grads = server.capture_weather_model_grads()
                     client_grad_lists.append(raw_grads)
