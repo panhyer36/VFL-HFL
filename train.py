@@ -501,48 +501,30 @@ def train(args):
 
         if train_weather:
             # === 路徑 A: train_weather=True (Phase 1, Phase 2 更新輪) ===
-            # 流程: Server 一次性下發嵌入 (no-grad, 省記憶體) → Client 逐 batch 訓練並累積嵌入梯度
-            #       → 累積完成後一次上傳 → Server 分塊反向傳播 (避免 OOM)
+            # 流程: Server send_embeddings → Client receive_embeddings → 逐 batch 訓練
+            #       → Client send_gradients → Server receive_gradients → 分塊反向傳播
 
             for client_name in selected_clients:
                 client = clients[client_name]
-
-                # 1. Server 一次性前向計算所有訓練集 Weather 嵌入 (不保留計算圖，節省記憶體)
                 X_w_raw = client_dataloaders[client_name]['train_weather_raw']
-                if config.download_compression_enabled:
-                    # B-LEC 下載端壓縮: 低秩殘差 SVD
-                    client_z_old = client.get_cached_weather_embeddings()
-                    if client_z_old is None:
-                        client_z_old = torch.zeros(
-                            X_w_raw.size(0), config.weather_d_model, device=device
-                        )
-                    A, B, z_new, dl_metrics = server.download_weather_embeddings_compressed(
-                        X_w_raw, client_z_old, config.svd_rank
-                    )
-                    dl_metrics['client'] = client_name
-                    round_dl_metrics.append(dl_metrics)
-                    if A is None:
-                        # 首輪未壓縮，直接使用完整嵌入
-                        all_embeddings = z_new.detach()
-                        server.record_download(client_name, all_embeddings)
-                    else:
-                        server.record_download(client_name, A)
-                        server.record_download(client_name, B)
-                        all_embeddings = VFLServer.reconstruct_from_low_rank(
-                            A, B, client_z_old
-                        )
-                    # 更新快取 (供下輪 delta 計算使用)
-                    client.cache_weather_embeddings(
-                        all_embeddings, server.weather_model_version
-                    )
-                else:
-                    with torch.no_grad():
-                        all_embeddings = server.download_weather_embeddings(
-                            X_w_raw, requires_grad=False
-                        )
-                    server.record_download(client_name, all_embeddings)
 
-                # 2. Client 逐 batch 訓練，累積嵌入梯度
+                # 1. Server 發送嵌入 (接口內部處理壓縮/回退/z_old管理/帶寬記錄)
+                payload, z_new_internal, dl_metrics = server.send_embeddings(
+                    X_w_raw, client_name,
+                    compress=config.download_compression_enabled,
+                    svd_rank=config.svd_rank,
+                    variance_threshold=config.download_variance_threshold
+                )
+                dl_metrics['client'] = client_name
+                round_dl_metrics.append(dl_metrics)
+
+                # 2. Client 接收嵌入 (接口內部處理重構/z_old管理)
+                all_embeddings = client.receive_embeddings(payload)
+
+                # 同時更新路徑 B 的快取 (版本號同步)
+                client.cache_weather_embeddings(all_embeddings, server.weather_model_version)
+
+                # 3. Client 逐 batch 訓練，累積嵌入梯度
                 X_h = client_dataloaders[client_name]['train_hfl']
                 y = client_dataloaders[client_name]['train_targets']
                 N = X_h.size(0)
@@ -570,29 +552,32 @@ def train(args):
                 client_losses.append(avg_loss)
                 print(f"    V {client_name}: Train Loss = {avg_loss:.6f}")
 
-                # 3. 累積嵌入梯度取平均後一次上傳，Server 分塊反向傳播
+                # 4. Client 發送梯度 (接口內部處理壓縮/Error Feedback)
                 if client_num_batches > 0:
                     avg_embedding_grad = accumulated_grad / client_num_batches
+                    grad_payload = client.send_gradients(avg_embedding_grad)
 
-                    # B-LEC 上傳端壓縮: Top-k Error Feedback
-                    if config.upload_compression_enabled:
-                        compressed_vals, comp_indices, grad_shape, ul_metrics = \
-                            client.compress_gradient_with_error_feedback(avg_embedding_grad)
-                        ul_metrics['client'] = client_name
-                        round_ul_metrics.append(ul_metrics)
-                        server.record_upload(client_name, [compressed_vals, comp_indices])
-                        decompressed_grad = VFLServer.decompress_gradient(
-                            compressed_vals, comp_indices, grad_shape, device
-                        )
-                        server.backward_weather_embeddings_chunked(
-                            X_w_raw, decompressed_grad
+                    if grad_payload['type'] == 'compressed':
+                        round_ul_metrics.append(grad_payload['metrics'])
+                        round_ul_metrics[-1]['client'] = client_name
+
+                    # 5. Server 接收梯度 (接口內部處理解壓縮 + 帶寬記錄)
+                    if grad_payload['type'] == 'compressed':
+                        decompressed_grad = server.receive_gradients(
+                            client_name,
+                            compressed_values=grad_payload['values'],
+                            indices=grad_payload['indices'],
+                            grad_shape=grad_payload['shape']
                         )
                     else:
-                        server.record_upload(client_name, [avg_embedding_grad])
-                        server.backward_weather_embeddings_chunked(
-                            X_w_raw, avg_embedding_grad
+                        decompressed_grad = server.receive_gradients(
+                            client_name,
+                            full_gradient=grad_payload['gradient']
                         )
 
+                    server.backward_weather_embeddings_chunked(
+                        X_w_raw, decompressed_grad
+                    )
                     raw_grads = server.capture_weather_model_grads()
                     client_grad_lists.append(raw_grads)
                     client_sample_counts.append(N)
@@ -612,34 +597,21 @@ def train(args):
             for client_name in selected_clients:
                 client = clients[client_name]
 
-                # 快取檢查: 版本不匹配時一次性計算整個訓練集嵌入
+                # 快取檢查: 版本不匹配時使用統一接口下發嵌入
                 if not client.is_cache_valid(server.weather_model_version):
                     X_w_raw = client_dataloaders[client_name]['train_weather_raw']
-                    if config.download_compression_enabled:
-                        # B-LEC 下載端壓縮: 低秩殘差 SVD
-                        client_z_old = client.get_cached_weather_embeddings()
-                        if client_z_old is None:
-                            client_z_old = torch.zeros(
-                                X_w_raw.size(0), config.weather_d_model, device=device
-                            )
-                        A, B, z_new, dl_metrics = server.download_weather_embeddings_compressed(
-                            X_w_raw, client_z_old, config.svd_rank
-                        )
-                        dl_metrics['client'] = client_name
-                        round_dl_metrics.append(dl_metrics)
-                        if A is None:
-                            Z_w = z_new.detach()
-                            server.record_download(client_name, Z_w)
-                        else:
-                            server.record_download(client_name, A)
-                            server.record_download(client_name, B)
-                            Z_w = VFLServer.reconstruct_from_low_rank(
-                                A, B, client_z_old
-                            )
-                    else:
-                        with torch.no_grad():
-                            Z_w = server.download_weather_embeddings(X_w_raw, requires_grad=False)
-                        server.record_download(client_name, Z_w)
+
+                    # 使用統一接口 (與路徑 A 相同，帶寬在接口內部記錄)
+                    payload, _, dl_metrics = server.send_embeddings(
+                        X_w_raw, client_name,
+                        compress=config.download_compression_enabled,
+                        svd_rank=config.svd_rank,
+                        variance_threshold=config.download_variance_threshold
+                    )
+                    dl_metrics['client'] = client_name
+                    round_dl_metrics.append(dl_metrics)
+
+                    Z_w = client.receive_embeddings(payload)
                     client.cache_weather_embeddings(Z_w, server.weather_model_version)
 
                 # 用快取嵌入建立臨時 DataLoader
@@ -668,19 +640,28 @@ def train(args):
         # === B-LEC 壓縮品質報告 (當輪) ===
         if round_dl_metrics:
             compressed_dl = [m for m in round_dl_metrics if m.get('compressed')]
+            fallback_dl = [m for m in round_dl_metrics if m.get('reason') == 'variance_fallback']
+            first_round_dl = [m for m in round_dl_metrics if m.get('reason') == 'first_round']
+
             if compressed_dl:
                 avg_explained = sum(m['explained_var'] for m in compressed_dl) / len(compressed_dl)
                 avg_rel_err  = sum(m['relative_error'] for m in compressed_dl) / len(compressed_dl)
                 avg_byte_r   = sum(m['byte_ratio'] for m in compressed_dl) / len(compressed_dl)
+                avg_bytes    = sum(m['bytes_sent'] for m in compressed_dl) / len(compressed_dl)
                 print(f"\n  [B-LEC Download SVD] rank={compressed_dl[0]['svd_rank']}, "
-                      f"clients={len(compressed_dl)}")
+                      f"compressed={len(compressed_dl)}, fallback={len(fallback_dl)}")
                 print(f"    Explained variance: {avg_explained:.4f}  |  "
                       f"Relative recon error: {avg_rel_err:.6f}  |  "
-                      f"Byte ratio: {avg_byte_r:.2%}")
-            else:
-                # 所有客戶端都是首輪未壓縮
-                print(f"\n  [B-LEC Download] First round - full embeddings sent "
-                      f"({len(round_dl_metrics)} clients)")
+                      f"Byte ratio: {avg_byte_r:.2%}  |  "
+                      f"Avg bytes: {format_bytes(avg_bytes)}")
+            if fallback_dl:
+                avg_var = sum(m['explained_var'] for m in fallback_dl) / len(fallback_dl)
+                print(f"    Variance fallback triggered: {len(fallback_dl)} clients "
+                      f"(avg explained var: {avg_var:.4f} < threshold {config.download_variance_threshold})")
+            if first_round_dl:
+                print(f"\n  [B-LEC Download] First round full send: {len(first_round_dl)} clients")
+            if not compressed_dl and not fallback_dl and not first_round_dl:
+                print(f"\n  [B-LEC Download] {len(round_dl_metrics)} clients (compression disabled)")
         if round_ul_metrics:
             avg_sparsity  = sum(m['sparsity'] for m in round_ul_metrics) / len(round_ul_metrics)
             avg_rel_err   = sum(m['relative_error'] for m in round_ul_metrics) / len(round_ul_metrics)

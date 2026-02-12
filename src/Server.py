@@ -137,6 +137,9 @@ class VFLServer:
         # === 通訊統計 ===
         self.comm_stats = {}  # {client_name: {'bytes_downloaded': 0, 'bytes_uploaded': 0}}
 
+        # === B-LEC 下載端: Server 側 z_old 管理 ===
+        self.z_old_server = {}  # {client_name: z_old_tensor}，每個客戶端獨立維護
+
     def select_clients(self, client_names: List[str]) -> List[str]:
         """
         選擇參與本輪訓練的客戶端
@@ -424,104 +427,171 @@ class VFLServer:
 
         return embeddings
 
-    def download_weather_embeddings_compressed(
+    def send_embeddings(
         self,
         weather_data: torch.Tensor,
-        client_z_old: torch.Tensor,
-        svd_rank: int
-    ):
+        client_name: str,
+        compress: bool = False,
+        svd_rank: int = 16,
+        variance_threshold: float = 0.85
+    ) -> tuple:
         """
-        下載端低秩殘差壓縮 (B-LEC): 傳送 delta_z 的截斷 SVD 分解
+        Server → Client: 發送 Weather 嵌入（統一接口）
 
-        流程:
-        1. 計算 z_new = Weather Model 嵌入
-        2. delta_z = z_new - z_old
-        3. 截斷 SVD: delta_z ≈ A @ B
-        4. 只傳送 {A, B}，通訊量 O((N+D)×r) 取代 O(N×D)
+        內部流程:
+        1. 計算 z_new
+        2. 若 compress=True 且非首輪:
+           a. delta_z = z_new - z_old_server[client_name]
+           b. SVD 截斷 → 檢查 explained_variance
+           c. 若 variance >= threshold: 傳送 {A, B}
+           d. 若 variance < threshold: 回退完整傳送 z_new (同時重置 z_old)
+        3. 更新 z_old_server[client_name]
+        4. 內部調用 record_download() 記錄帶寬
+
+        z_old 更新策略:
+        - 壓縮成功: z_old_server = z_hat = z_old + A@B (存重構值，避免誤差累積)
+        - 完整傳送:  z_old_server = z_new (精確重置，清除所有累積誤差)
+        - 首輪:      z_old_server = z_new (初始化)
 
         Args:
-            weather_data: Weather 輸入數據 (N, seq_len, feature_dim)
-            client_z_old: 客戶端的舊快取嵌入 (N, D)，首輪為零張量
-            svd_rank: 截斷 SVD 的 rank
+            weather_data: Weather 輸入數據
+            client_name: 客戶端名稱 (用於查找對應的 z_old)
+            compress: 是否啟用 SVD 壓縮
+            svd_rank: 截斷 SVD rank
+            variance_threshold: explained variance ratio 閾值
 
         Returns:
-            A: (N, r) 左因子，若首輪未壓縮則為 None
-            B: (r, D) 右因子，若首輪未壓縮則為 None
-            z_new: (N, D) 完整嵌入 (Server 端保留，不傳送)
+            payload: dict {'type': 'full'/'compressed', ...}
+            z_new: 完整嵌入 (Server 內部使用，用於 backward)
             metrics: dict 壓縮品質指標
         """
+        # 計算完整嵌入
         self.global_weather_model.eval()
         with torch.no_grad():
             z_new = self.global_weather_model.forward_embedding(weather_data)
 
-        # 首輪 z_old=0 時 delta_z 低秩近似品質差，直接傳送完整嵌入
-        if torch.all(client_z_old == 0):
+        # 初始化該客戶端的 z_old (首次)
+        if client_name not in self.z_old_server:
+            self.z_old_server[client_name] = torch.zeros_like(z_new)
+
+        z_old = self.z_old_server[client_name]
+
+        # 不壓縮 或 首輪 (z_old 全零) → 完整傳送
+        if not compress or torch.all(z_old == 0):
+            self.z_old_server[client_name] = z_new.detach().clone()
+            emb = z_new.detach()
+            self.record_download(client_name, emb)
+            if not compress:
+                reason = 'disabled'
+            else:
+                reason = 'first_round'
             metrics = {
                 'compressed': False,
-                'reason': 'first_round',
+                'reason': reason,
+                'bytes_sent': emb.nelement() * emb.element_size(),
             }
-            return None, None, z_new, metrics
+            payload = {'type': 'full', 'embeddings': emb}
+            return payload, z_new, metrics
 
-        delta_z = z_new - client_z_old
+        # SVD 壓縮
+        delta_z = z_new - z_old
 
-        # 截斷 SVD 分解 (在 CPU 上執行以確保跨設備相容性)
         try:
             U, S, Vh = torch.linalg.svd(delta_z.float(), full_matrices=False)
         except Exception:
-            # MPS 等設備可能不支持 SVD，回退到 CPU
             delta_cpu = delta_z.float().cpu()
             U, S, Vh = torch.linalg.svd(delta_cpu, full_matrices=False)
             U, S, Vh = U.to(delta_z.device), S.to(delta_z.device), Vh.to(delta_z.device)
 
         r = min(svd_rank, len(S))
-        A = U[:, :r] @ torch.diag(S[:r])   # (N, r)
-        B = Vh[:r, :]                        # (r, D)
-
-        # === 壓縮品質指標 ===
         S_sq = S.float() ** 2
         total_var = S_sq.sum().item()
         explained_var = S_sq[:r].sum().item() / total_var if total_var > 0 else 1.0
 
+        # 自適應品質控制: variance 低於閾值 → 回退完整傳送 (重置 z_old)
+        if explained_var < variance_threshold:
+            self.z_old_server[client_name] = z_new.detach().clone()
+            emb = z_new.detach()
+            self.record_download(client_name, emb)
+            metrics = {
+                'compressed': False,
+                'reason': 'variance_fallback',
+                'explained_var': explained_var,
+                'threshold': variance_threshold,
+                'bytes_sent': emb.nelement() * emb.element_size(),
+            }
+            payload = {'type': 'full', 'embeddings': emb}
+            return payload, z_new, metrics
+
+        # 壓縮成功
+        A = U[:, :r] @ torch.diag(S[:r])  # (N, r)
+        B = Vh[:r, :]                       # (r, D)
+
+        # z_old 更新為 z_hat (重構值)，不用 z_new
+        z_hat = z_old + A @ B
+        self.z_old_server[client_name] = z_hat.detach().clone()
+
+        A_out = A.detach()
+        B_out = B.detach()
+
+        # 帶寬記錄
+        self.record_download(client_name, A_out)
+        self.record_download(client_name, B_out)
+        bytes_sent = A_out.nelement() * A_out.element_size() + B_out.nelement() * B_out.element_size()
+        full_bytes = delta_z.nelement() * delta_z.element_size()
+
         recon = A @ B
         recon_error_norm = (delta_z.float() - recon).norm().item()
         delta_norm = delta_z.float().norm().item()
-        relative_error = recon_error_norm / delta_norm if delta_norm > 0 else 0.0
-
-        # 通訊量壓縮比
-        full_bytes = delta_z.nelement() * delta_z.element_size()
-        comp_bytes = (A.nelement() + B.nelement()) * A.element_size()
 
         metrics = {
             'compressed': True,
             'svd_rank': r,
             'explained_var': explained_var,
-            'relative_error': relative_error,
+            'relative_error': recon_error_norm / delta_norm if delta_norm > 0 else 0.0,
             'delta_norm': delta_norm,
             'full_bytes': full_bytes,
-            'comp_bytes': comp_bytes,
-            'byte_ratio': comp_bytes / full_bytes if full_bytes > 0 else 1.0,
+            'bytes_sent': bytes_sent,
+            'byte_ratio': bytes_sent / full_bytes if full_bytes > 0 else 1.0,
         }
+        payload = {'type': 'compressed', 'A': A_out, 'B': B_out}
+        return payload, z_new, metrics
 
-        return A, B, z_new, metrics
-
-    @staticmethod
-    def reconstruct_from_low_rank(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        z_old: torch.Tensor
+    def receive_gradients(
+        self,
+        client_name: str,
+        compressed_values: torch.Tensor = None,
+        indices: torch.Tensor = None,
+        grad_shape: torch.Size = None,
+        full_gradient: torch.Tensor = None
     ) -> torch.Tensor:
         """
-        從低秩分解重構嵌入: z_hat = z_old + A @ B
+        Server ← Client: 接收上傳梯度（統一接口）
+
+        內部自動調用 record_upload() 記錄帶寬。
+        根據傳入參數自動判斷壓縮/未壓縮:
+        - 若 compressed_values 不為 None → Top-k 解壓縮
+        - 若 full_gradient 不為 None → 直接使用
 
         Args:
-            A: (N, r) 左因子
-            B: (r, D) 右因子
-            z_old: (N, D) 舊快取嵌入
+            client_name: 客戶端名稱 (用於通訊統計)
+            compressed_values: Top-k 壓縮值 (壓縮模式)
+            indices: Top-k 索引 (壓縮模式)
+            grad_shape: 原始梯度形狀 (壓縮模式)
+            full_gradient: 完整梯度 (非壓縮模式)
 
         Returns:
-            z_hat: (N, D) 重構後的嵌入
+            gradient: 解壓縮後 (或原始) 的密集梯度
         """
-        return z_old + A @ B
+        if compressed_values is not None:
+            self.record_upload(client_name, [compressed_values, indices])
+            gradient = self.decompress_gradient(
+                compressed_values, indices, grad_shape, compressed_values.device
+            )
+        else:
+            self.record_upload(client_name, [full_gradient])
+            gradient = full_gradient
+        return gradient
 
     @staticmethod
     def decompress_gradient(

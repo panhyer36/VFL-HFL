@@ -149,6 +149,7 @@ def load_config(config_path="config.yaml"):
     upload_config = comm_config.get('upload', {})
     config.download_compression_enabled = download_config.get('enabled', False)
     config.svd_rank = download_config.get('svd_rank', 16)
+    config.download_variance_threshold = download_config.get('variance_threshold', 0.85)
     config.upload_compression_enabled = upload_config.get('enabled', False)
     config.top_k_ratio = upload_config.get('top_k_ratio', 0.05)
 

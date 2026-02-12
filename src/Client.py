@@ -138,6 +138,9 @@ class VFLClient:
         self.cached_weather_embeddings = None   # 快取的完整訓練集 Weather 嵌入
         self.weather_cache_version = -1         # 對應的 Weather Model 版本
 
+        # === B-LEC 下載端: Client 側 z_old 管理 ===
+        self.z_old_client = None  # 壓縮基準值，與 Server 側 z_old_server 同步
+
         # === B-LEC 上傳端 Error Feedback 壓縮 ===
         self.error_buffer = None  # 殘差緩衝區，首次使用時初始化，跨輪次持續累積
         self.top_k_ratio = getattr(config, 'top_k_ratio', 0.05)
@@ -528,6 +531,67 @@ class VFLClient:
         }
 
         return compressed_values, topk_indices, v.shape, metrics
+
+    def receive_embeddings(self, payload: dict) -> torch.Tensor:
+        """
+        Client ← Server: 接收 Weather 嵌入（統一接口）
+
+        根據 payload['type'] 自動處理:
+        - 'full': 直接使用完整嵌入，並重置 z_old_client = embeddings
+        - 'compressed': z_hat = z_old_client + A @ B，並更新 z_old_client = z_hat
+
+        Args:
+            payload: Server 傳來的 dict
+                - {'type': 'full', 'embeddings': tensor}
+                - {'type': 'compressed', 'A': tensor, 'B': tensor}
+
+        Returns:
+            embeddings: 重構後的嵌入 (N, D)
+        """
+        if payload['type'] == 'full':
+            embeddings = payload['embeddings']
+            self.z_old_client = embeddings.detach().clone()
+            return embeddings
+        else:
+            A, B = payload['A'], payload['B']
+            if self.z_old_client is None:
+                raise RuntimeError("Cannot decompress: z_old_client not initialized")
+            z_hat = self.z_old_client + A @ B
+            self.z_old_client = z_hat.detach().clone()
+            return z_hat
+
+    def send_gradients(self, gradient: torch.Tensor) -> dict:
+        """
+        Client → Server: 發送嵌入梯度（統一接口）
+
+        根據 self.upload_compression_enabled 自動選擇:
+        - True: Top-k Error Feedback 壓縮
+        - False: 完整梯度
+
+        Args:
+            gradient: 平均嵌入梯度 (N, D)
+
+        Returns:
+            payload: dict
+                - {'type': 'full', 'gradient': tensor}
+                - {'type': 'compressed', 'values': tensor, 'indices': tensor,
+                   'shape': Size, 'metrics': dict}
+        """
+        if self.upload_compression_enabled:
+            values, indices, shape, metrics = \
+                self.compress_gradient_with_error_feedback(gradient)
+            return {
+                'type': 'compressed',
+                'values': values,
+                'indices': indices,
+                'shape': shape,
+                'metrics': metrics,
+            }
+        else:
+            return {
+                'type': 'full',
+                'gradient': gradient,
+            }
 
     def cache_weather_embeddings(self, embeddings: torch.Tensor, version: int):
         """快取 Weather 嵌入與對應版本號"""
