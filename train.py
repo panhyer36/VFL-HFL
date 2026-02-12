@@ -43,6 +43,18 @@ from src.Personalizer import initialize_personalized_models, save_personalized_m
 load_dotenv()
 
 
+def format_bytes(num_bytes):
+    """將 bytes 轉換為人類可讀格式 (KB/MB/GB)"""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    elif num_bytes < 1024 ** 2:
+        return f"{num_bytes / 1024:.2f} KB"
+    elif num_bytes < 1024 ** 3:
+        return f"{num_bytes / 1024 ** 2:.2f} MB"
+    else:
+        return f"{num_bytes / 1024 ** 3:.2f} GB"
+
+
 def send_message(message):
     """
     發送消息到 Webhook
@@ -240,7 +252,11 @@ def load_client_data(config, weather_sequences, client_csv_files):
         client_dataloaders[client_name] = {
             'train': train_loader,
             'val': val_loader,
-            'train_size': len(train_dataset)
+            'train_size': len(train_dataset),
+            # 原始 tensor (用於快取路徑建立臨時 DataLoader)
+            'train_weather_raw': X_w_train,
+            'train_hfl': X_h_train,
+            'train_targets': y_train,
         }
 
         print(f"  V Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
@@ -413,7 +429,10 @@ def train(args):
         )
         clients[client_name] = client
 
-    # === 步驟 5.5: 初始凍結 LoRA (Phase 0) ===
+    # === 步驟 5.5: 初始化通訊統計 ===
+    server.init_comm_stats(client_names)
+
+    # === 步驟 5.6: 初始凍結 LoRA (Phase 0) ===
     if config.lora_rank > 0:
         for client in clients.values():
             client.set_lora_training(False)
@@ -473,73 +492,110 @@ def train(args):
         # === Split Learning 訓練 (Batch-wise with FedAvg Aggregation) ===
         print(f"\n  Distributed Training (Split Learning) with FedAvg aggregation:")
 
-        if train_weather:
-            server.zero_weather_model_grad()
-
         client_losses = []
         client_grad_lists = []
         client_sample_counts = []
 
-        # 逐個客戶端進行訓練 (Batch-wise)
-        for client_name in selected_clients:
-            client = clients[client_name]
-            train_loader = client_dataloaders[client_name]['train']
+        if train_weather:
+            # === 路徑 A: train_weather=True (Phase 1, Phase 2 更新輪) ===
+            # 流程: Server 一次性下發嵌入 → Client 逐 batch 訓練並累積嵌入梯度
+            #       → 累積完成後一次上傳 → Server 一次性反向傳播
 
-            # --- 訓練階段 ---
-            client_total_loss = 0
-            client_num_batches = 0
+            for client_name in selected_clients:
+                client = clients[client_name]
 
-            # 遍歷每個 Batch
-            for batch_idx, (weather_batch, hfl_batch, targets) in enumerate(train_loader):
-                weather_batch = weather_batch.to(device)
+                # 1. Server 一次性前向計算所有訓練集 Weather 嵌入 (保留計算圖)
+                X_w_raw = client_dataloaders[client_name]['train_weather_raw']
+                all_embeddings = server.download_weather_embeddings(
+                    X_w_raw, requires_grad=True
+                )
+                server.record_download(client_name, all_embeddings)
 
-                # 1. Server 計算 Weather 嵌入 (Batch-wise)
-                weather_embedding = server.compute_weather_embeddings(
-                    weather_batch,
-                    requires_grad=train_weather
+                # 2. Client 逐 batch 訓練，累積嵌入梯度
+                X_h = client_dataloaders[client_name]['train_hfl']
+                y = client_dataloaders[client_name]['train_targets']
+                N = X_h.size(0)
+                indices = torch.arange(N, device=device)
+                idx_dataset = TensorDataset(indices, X_h, y)
+                idx_loader = DataLoader(
+                    idx_dataset, batch_size=config.batch_size, shuffle=True
                 )
 
-                # 2. Client 執行訓練步
-                loss, weather_grad = client.train_batch(
-                    weather_embedding,
-                    hfl_batch,
-                    targets,
-                    train_weather=train_weather
+                accumulated_grad = torch.zeros_like(all_embeddings)
+                client_total_loss = 0
+                client_num_batches = 0
+
+                for idx_batch, hfl_batch, targets in idx_loader:
+                    emb_batch = all_embeddings[idx_batch].detach().requires_grad_(True)
+                    loss, weather_grad = client.train_batch(
+                        emb_batch, hfl_batch, targets, train_weather=True
+                    )
+                    if weather_grad is not None:
+                        accumulated_grad[idx_batch] = weather_grad
+                    client_total_loss += loss
+                    client_num_batches += 1
+
+                avg_loss = client_total_loss / client_num_batches if client_num_batches > 0 else 0
+                client_losses.append(avg_loss)
+                print(f"    V {client_name}: Train Loss = {avg_loss:.6f}")
+
+                # 3. 累積嵌入梯度取平均後一次上傳，Server 一次性反向傳播
+                if client_num_batches > 0:
+                    avg_embedding_grad = accumulated_grad / client_num_batches
+                    server.record_upload(client_name, [avg_embedding_grad])
+
+                    server.zero_weather_model_grad()
+                    all_embeddings.backward(avg_embedding_grad)
+
+                    raw_grads = server.capture_weather_model_grads()
+                    client_grad_lists.append(raw_grads)
+                    client_sample_counts.append(N)
+
+                del all_embeddings, accumulated_grad
+
+            # Server FedAvg 聚合並更新 Weather Model
+            if client_grad_lists:
+                updated = server.upload_and_aggregate_gradients(
+                    client_grad_lists, client_sample_counts
+                )
+                if updated:
+                    print(f"    V Global Weather Model updated (FedAvg, version={server.weather_model_version})")
+
+        else:
+            # === 路徑 B: train_weather=False (Phase 0, Phase 2 非更新輪) ===
+            for client_name in selected_clients:
+                client = clients[client_name]
+
+                # 快取檢查: 版本不匹配時一次性計算整個訓練集嵌入
+                if not client.is_cache_valid(server.weather_model_version):
+                    X_w_raw = client_dataloaders[client_name]['train_weather_raw']
+                    with torch.no_grad():
+                        Z_w = server.download_weather_embeddings(X_w_raw, requires_grad=False)
+                    server.record_download(client_name, Z_w)
+                    client.cache_weather_embeddings(Z_w, server.weather_model_version)
+
+                # 用快取嵌入建立臨時 DataLoader
+                cached_Z = client.get_cached_weather_embeddings()
+                X_h = client_dataloaders[client_name]['train_hfl']
+                y = client_dataloaders[client_name]['train_targets']
+                cached_dataset = TensorDataset(cached_Z, X_h, y)
+                cached_loader = DataLoader(
+                    cached_dataset, batch_size=config.batch_size, shuffle=True
                 )
 
-                # 3. Server 反向傳播 (累積梯度)
-                if train_weather and weather_grad is not None:
-                    weather_embedding.backward(weather_grad)
+                client_total_loss = 0
+                client_num_batches = 0
 
-                client_total_loss += loss
-                client_num_batches += 1
+                for emb_batch, hfl_batch, targets in cached_loader:
+                    loss, _ = client.train_batch(
+                        emb_batch, hfl_batch, targets, train_weather=False
+                    )
+                    client_total_loss += loss
+                    client_num_batches += 1
 
-                # 釋放記憶體
-                del weather_embedding, weather_grad, loss
-
-            # 計算該客戶端的平均 Loss
-            avg_loss = client_total_loss / client_num_batches if client_num_batches > 0 else 0
-            client_losses.append(avg_loss)
-            print(f"    V {client_name}: Train Loss = {avg_loss:.6f}")
-
-            if train_weather and client_num_batches > 0:
-                # 擷取累積梯度並除以 batch 數量 (取平均)
-                # 防止梯度與 FedAvg 樣本數加權產生二次加權
-                raw_grads = server.capture_weather_model_grads()
-                avg_grads = [g / client_num_batches for g in raw_grads]
-                client_grad_lists.append(avg_grads)
-                client_sample_counts.append(len(train_loader.dataset))
-                server.zero_weather_model_grad()
-
-        # === Server FedAvg 聚合並更新 Weather Model ===
-        if train_weather and client_grad_lists:
-            aggregated_grads = server.aggregate_weather_gradients(
-                client_grad_lists,
-                client_sample_counts
-            )
-            if aggregated_grads:  # 可能因 NaN/Inf 過濾後為空
-                server.apply_aggregated_gradients(aggregated_grads)
-                print(f"    V Global Weather Model updated (FedAvg)")
+                avg_loss = client_total_loss / client_num_batches if client_num_batches > 0 else 0
+                client_losses.append(avg_loss)
+                print(f"    V {client_name}: Train Loss = {avg_loss:.6f}")
 
         # === 驗證所有客戶端 (穩定的早停信號) ===
         all_val_losses = []
@@ -551,7 +607,7 @@ def train(args):
             val_batches = 0
             for weather_batch, hfl_batch, targets in val_loader:
                 weather_batch = weather_batch.to(device)
-                weather_embedding = server.compute_weather_embeddings(
+                weather_embedding = server.download_weather_embeddings(
                     weather_batch, requires_grad=False
                 )
                 l = cl.evaluate_batch(weather_embedding, hfl_batch, targets)
@@ -632,11 +688,24 @@ def train(args):
     print(f"\nTraining Summary:")
     print(f"  - Total rounds: {summary['total_rounds']}")
     print(f"  - Training strategy: {summary['training_strategy']}")
-    print(f"  - Weather Model updates: {summary['weather_updates']}")
-    print(f"  - Actual communication saving: {summary['comm_saving_actual']:.1f}%")
     print(f"  - Best val loss: {summary['best_val_loss']:.6f}")
     print(f"  - Final train loss: {summary['final_train_loss']:.6f}")
     print(f"  - Final val loss: {summary['final_val_loss']:.6f}")
+
+    # === 步驟 9.5: 通訊統計 ===
+    comm_stats = server.get_comm_stats()
+    print(f"\nCommunication Statistics (Training Only):")
+    print(f"{'Client':<25} {'Downloaded':>15} {'Uploaded':>15} {'Total':>15}")
+    print(f"{'─' * 70}")
+    total_down = total_up = 0
+    for name, stats in comm_stats.items():
+        down = stats['bytes_downloaded']
+        up = stats['bytes_uploaded']
+        print(f"{name:<25} {format_bytes(down):>15} {format_bytes(up):>15} {format_bytes(down + up):>15}")
+        total_down += down
+        total_up += up
+    print(f"{'─' * 70}")
+    print(f"{'Total':<25} {format_bytes(total_down):>15} {format_bytes(total_up):>15} {format_bytes(total_down + total_up):>15}")
 
     print(f"\nModels saved to: {config.model_save_path}/")
     print(f"  - Best models: best_weather_model.pth + best_*_fusion_model.pth")

@@ -134,6 +134,10 @@ class VFLClient:
             weight_decay=1e-4
         )
 
+        # === Weather 嵌入快取 (z_old) ===
+        self.cached_weather_embeddings = None   # 快取的完整訓練集 Weather 嵌入
+        self.weather_cache_version = -1         # 對應的 Weather Model 版本
+
         print(f"Device: {device}")
         print(f"{'=' * 70}")
 
@@ -453,6 +457,25 @@ class VFLClient:
 
         avg_test_loss = test_loss / num_batches if num_batches > 0 else 0.0
         return avg_test_loss, np.array(all_predictions), np.array(all_targets)
+
+    def cache_weather_embeddings(self, embeddings: torch.Tensor, version: int):
+        """快取 Weather 嵌入與對應版本號"""
+        self.cached_weather_embeddings = embeddings.detach()
+        self.weather_cache_version = version
+
+    def get_cached_weather_embeddings(self) -> torch.Tensor:
+        """取得快取的 Weather 嵌入"""
+        return self.cached_weather_embeddings
+
+    def is_cache_valid(self, current_version: int) -> bool:
+        """檢查快取是否與當前 Weather Model 版本匹配"""
+        return (self.cached_weather_embeddings is not None
+                and self.weather_cache_version == current_version)
+
+    def clear_weather_cache(self):
+        """清除快取"""
+        self.cached_weather_embeddings = None
+        self.weather_cache_version = -1
 
     def set_lora_training(self, trainable: bool):
         """設定 LoRA 訓練狀態 (Phase 0 凍結 / Phase 1+ 解凍)"""

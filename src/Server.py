@@ -129,27 +129,13 @@ class VFLServer:
         print(f"  - Phase 0 ({config.phase0_rounds} rounds): Fusion warmup - Weather frozen")
         print(f"  - Phase 1 ({config.phase1_rounds} rounds): Joint training - Fusion + Weather every round")
         print(f"  - Phase 2 ({config.phase2_rounds} rounds): Comm optimized - {config.phase2_fusion_freq} rounds Fusion, 1 round Weather")
-        print(f"  - Estimated communication saving: {self._estimate_comm_saving():.1f}%")
         print("=" * 70)
 
-    def _estimate_comm_saving(self):
-        """
-        估計通訊節省比例
+        # === Weather Model 版本號 (每次成功更新 +1，用於快取判斷) ===
+        self.weather_model_version = 0
 
-        三階段策略通訊分析:
-        - Phase 0: 無 Weather Model 更新 (0 次通訊)
-        - Phase 1: 每輪更新 Weather Model (phase1_rounds 次通訊)
-        - Phase 2: 週期性更新 (actual_phase2 / (phase2_fusion_freq + 1) 次通訊)
-        """
-        phase0_updates = 0  # Phase 0 不更新 Weather Model
-        phase1_updates = self.config.phase1_rounds
-        # 使用實際 Phase 2 輪數 (已由 config.py 自動計算為 K - phase0 - phase1)
-        actual_phase2 = self.config.phase2_rounds
-        phase2_updates = actual_phase2 // (self.config.phase2_fusion_freq + 1)
-        total_updates = phase0_updates + phase1_updates + phase2_updates
-        total_rounds = self.config.K
-        saving = (1 - total_updates / total_rounds) * 100
-        return saving
+        # === 通訊統計 ===
+        self.comm_stats = {}  # {client_name: {'bytes_downloaded': 0, 'bytes_uploaded': 0}}
 
     def select_clients(self, client_names: List[str]) -> List[str]:
         """
@@ -246,23 +232,38 @@ class VFLServer:
                 'train_weather': self.should_update_weather()
             }
 
-    def aggregate_weather_gradients(
+    def upload_and_aggregate_gradients(
+        self,
+        client_grad_lists: List[List[torch.Tensor]],
+        client_sample_counts: List[int]
+    ) -> bool:
+        """
+        Client → Server: 接收上傳的累積梯度, FedAvg 聚合後更新 Weather Model
+
+        Args:
+            client_grad_lists: 每個客戶端的平均梯度列表
+            client_sample_counts: 每個客戶端的數據量
+
+        Returns:
+            bool: 是否成功更新 Weather Model
+        """
+        aggregated = self._aggregate_weather_gradients(client_grad_lists, client_sample_counts)
+        if aggregated:
+            self._apply_aggregated_gradients(aggregated)
+            self.weather_model_version += 1
+            return True
+        return False
+
+    def _aggregate_weather_gradients(
         self,
         client_gradients: List[List[torch.Tensor]],
         client_weights: List[int]
     ) -> List[torch.Tensor]:
         """
-        FedAvg 梯度聚合 - Weather Model
-
-        聚合策略:
-        1. NaN/Inf 過濾: 跳過包含異常梯度的客戶端
-        2. 加權平均: 根據客戶端數據量加權
-        3. 正規化: 確保權重總和為 1
-        4. 參數對應: 逐參數進行加權平均
+        FedAvg 梯度聚合 - Weather Model (內部方法)
 
         Args:
             client_gradients: 每個客戶端的梯度列表
-                格式: [[param1_grad, param2_grad, ...], ...]
             client_weights: 每個客戶端的數據量
 
         Returns:
@@ -305,9 +306,9 @@ class VFLServer:
 
         return aggregated_grads
 
-    def apply_aggregated_gradients(self, aggregated_grads: List[torch.Tensor]):
+    def _apply_aggregated_gradients(self, aggregated_grads: List[torch.Tensor]):
         """
-        將聚合後的梯度應用到全局 Weather Model
+        將聚合後的梯度應用到全局 Weather Model (內部方法)
 
         Args:
             aggregated_grads: 聚合後的梯度列表
@@ -398,13 +399,13 @@ class VFLServer:
         # 記錄更新
         self.history['weather_update_rounds'].append(self.current_round)
 
-    def compute_weather_embeddings(
+    def download_weather_embeddings(
         self,
         weather_data: torch.Tensor,
         requires_grad: bool = False
     ) -> torch.Tensor:
         """
-        計算 Weather 嵌入向量 (前向傳播)
+        Server 計算 Weather 嵌入後下發給 Client
 
         Args:
             weather_data: Weather 輸入數據 (num_samples, seq_len, feature_dim)
@@ -412,10 +413,6 @@ class VFLServer:
 
         Returns:
             weather_embeddings: Weather 嵌入向量 (num_samples, d_model)
-
-        Note:
-            - Weather Model 只存在於 Server 端
-            - Client 只接收嵌入向量，不接觸原始 Weather Model
         """
         if requires_grad:
             self.global_weather_model.train()
@@ -485,6 +482,25 @@ class VFLServer:
         torch.save(self.global_weather_model.state_dict(), save_path)
         print(f"\nFinal model saved: {save_path}")
 
+    def init_comm_stats(self, client_names: List[str]):
+        """初始化通訊統計"""
+        self.comm_stats = {name: {'bytes_downloaded': 0, 'bytes_uploaded': 0} for name in client_names}
+
+    def record_download(self, client_name: str, tensor: torch.Tensor):
+        """記錄 Server → Client 下載通訊量"""
+        if client_name in self.comm_stats:
+            self.comm_stats[client_name]['bytes_downloaded'] += tensor.nelement() * tensor.element_size()
+
+    def record_upload(self, client_name: str, tensors: List[torch.Tensor]):
+        """記錄 Client → Server 上傳通訊量"""
+        if client_name in self.comm_stats:
+            for t in tensors:
+                self.comm_stats[client_name]['bytes_uploaded'] += t.nelement() * t.element_size()
+
+    def get_comm_stats(self) -> Dict:
+        """獲取通訊統計"""
+        return self.comm_stats
+
     def get_training_summary(self) -> Dict:
         """
         獲取訓練摘要統計 (含三階段策略分析)
@@ -492,7 +508,6 @@ class VFLServer:
         Returns:
             summary: 訓練摘要字典
         """
-        weather_updates = len(self.history['weather_update_rounds'])
         total_rounds = self.current_round + 1
 
         # 三階段配置
@@ -502,8 +517,6 @@ class VFLServer:
 
         summary = {
             'total_rounds': total_rounds,
-            'weather_updates': weather_updates,
-            'comm_saving_actual': (1 - weather_updates / total_rounds) * 100 if total_rounds > 0 else 0,
             'best_val_loss': self.best_val_loss,
             'final_train_loss': self.history['train_loss'][-1] if self.history['train_loss'] else 0,
             'final_val_loss': self.history['val_loss'][-1] if self.history['val_loss'] else 0,
